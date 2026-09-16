@@ -39,7 +39,9 @@ def configure(service_name: str) -> None:
     provider.add_span_processor(
         BatchSpanProcessor(
             OTLPSpanExporter(
-                endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317"),
+                endpoint=os.environ.get(
+                    "OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317"
+                ),
                 insecure=True,
             )
         )

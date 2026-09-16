@@ -8,7 +8,10 @@ from rich.table import Table
 
 from aftermerge.telemetry import catalog, client
 
-app = typer.Typer(help="AfterMerge: closed-loop production regression pipeline.", no_args_is_help=True)
+app = typer.Typer(
+    help="AfterMerge: closed-loop production regression pipeline.",
+    no_args_is_help=True,
+)
 console = Console()
 
 
