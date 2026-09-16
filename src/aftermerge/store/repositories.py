@@ -23,7 +23,14 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from aftermerge.store.tables import Deployment, Fact, Hypothesis, Incident, Verification
+from aftermerge.store.tables import (
+    CapturedRequest,
+    Deployment,
+    Fact,
+    Hypothesis,
+    Incident,
+    Verification,
+)
 from aftermerge.telemetry.client import FactResult
 
 SEVERITIES = ("minor", "major", "critical")
@@ -264,5 +271,70 @@ class VerificationRepository:
             select(Verification)
             .where(Verification.hypothesis_id == hypothesis_id)
             .order_by(Verification.ran_at)
+        )
+        return list(self._session.execute(stmt).scalars().all())
+
+
+class CapturedRequestRepository:
+    """Production requests reconstructed from telemetry."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def record(
+        self,
+        *,
+        envelope: Any,
+        incident_id: uuid.UUID | None = None,
+        observations: int = 1,
+        status_code: int | None = None,
+        max_duration_ms: float | None = None,
+        unreplayable_reason: str | None = None,
+    ) -> CapturedRequest:
+        """Persist one captured request.
+
+        `replay_safe` is computed here, never taken from the caller: it is true
+        only when the envelope was sanitised *and* nothing made it unreplayable.
+        """
+        captured = CapturedRequest(
+            id=uuid.uuid4(),
+            incident_id=incident_id,
+            method=envelope.method,
+            path=envelope.path,
+            query=dict(envelope.query),
+            headers=dict(envelope.headers),
+            replay_safe=bool(envelope.replay_safe and unreplayable_reason is None),
+            unreplayable_reason=unreplayable_reason,
+            source_trace_id=envelope.source_trace_id,
+            observations=observations,
+            status_code=status_code,
+            max_duration_ms=max_duration_ms,
+            captured_at=datetime.now(UTC),
+        )
+        self._session.add(captured)
+        self._session.flush()
+        return captured
+
+    def for_incident(self, incident_id: uuid.UUID) -> list[CapturedRequest]:
+        stmt = (
+            select(CapturedRequest)
+            .where(CapturedRequest.incident_id == incident_id)
+            .order_by(CapturedRequest.max_duration_ms.desc().nullslast())
+        )
+        return list(self._session.execute(stmt).scalars().all())
+
+    def replayable_for_incident(self, incident_id: uuid.UUID) -> list[CapturedRequest]:
+        """Only requests that can actually be reproduced.
+
+        Replay should never have to decide this for itself, and should never see
+        a request it must not send.
+        """
+        stmt = (
+            select(CapturedRequest)
+            .where(
+                CapturedRequest.incident_id == incident_id,
+                CapturedRequest.replay_safe.is_(True),
+            )
+            .order_by(CapturedRequest.max_duration_ms.desc().nullslast())
         )
         return list(self._session.execute(stmt).scalars().all())

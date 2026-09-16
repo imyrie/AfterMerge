@@ -14,8 +14,14 @@ from aftermerge.detector.rules import SLO
 from aftermerge.investigator import service as investigator_service
 from aftermerge.investigator.code_map import DEFAULT_SOURCE_PREFIX
 from aftermerge.report import render as report_render
+from aftermerge.reproducer import capture as capture_mod
 from aftermerge.store import db as store_db
-from aftermerge.store.repositories import DeploymentRepository, FactRepository, IncidentRepository
+from aftermerge.store.repositories import (
+    CapturedRequestRepository,
+    DeploymentRepository,
+    FactRepository,
+    IncidentRepository,
+)
 from aftermerge.telemetry import catalog, client
 
 app = typer.Typer(
@@ -296,3 +302,56 @@ def investigate(
         console.print(f"report written to {output}")
     else:
         console.print(markdown)
+
+
+@app.command()
+def capture(
+    route_service: str = typer.Option("gateway", help="Service whose inbound requests to capture."),
+    lookback_minutes: int = typer.Option(120, help="How far back to read telemetry."),
+    max_shapes: int = typer.Option(20, help="Maximum distinct request shapes to keep."),
+) -> None:
+    """Reconstruct replayable requests from the regressed version's telemetry."""
+    engine = _prepared_engine()
+    ch = client.get_client()
+
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        incidents_found = IncidentRepository(session).list_recent(limit=1)
+        if not incidents_found:
+            console.print("[yellow]no incidents recorded; run `aftermerge detect` first[/yellow]")
+            raise typer.Exit(code=2)
+
+        incident = incidents_found[0]
+        capture_mod.capture_for_incident(
+            session,
+            incident,
+            ch=ch,
+            route_service=route_service,
+            lookback_minutes=lookback_minutes,
+            max_shapes=max_shapes,
+        )
+        rows = [
+            (
+                r.method,
+                r.path,
+                "&".join(f"{k}={v}" for k, v in r.query.items()) or "-",
+                str(r.observations),
+                "yes" if r.replay_safe else "no",
+                r.unreplayable_reason or "",
+            )
+            for r in CapturedRequestRepository(session).for_incident(incident.id)
+        ]
+
+    if not rows:
+        console.print("[yellow]no request shapes found in the lookback window[/yellow]")
+        return
+
+    table = Table(title="captured requests", title_justify="left", header_style="bold")
+    for column in ("method", "path", "query", "seen", "replayable"):
+        table.add_column(column, no_wrap=True)
+    for row in rows:
+        table.add_row(*row[:5])
+    console.print(table)
+
+    for row in rows:
+        if row[5]:
+            console.print(f"\n[yellow]{row[0]} {row[1]} not replayable:[/yellow] {row[5]}")

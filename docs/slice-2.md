@@ -4,7 +4,7 @@
 differential replay, and generate a regression test that provably fails on the bad commit and passes
 on the good one.
 
-**Status:** part 1 done (2026-09-16). Parts 2-5 are still a plan.
+**Status:** parts 1 and 2 done (2026-09-16). Parts 3-5 are still a plan.
 
 **Why this slice is the differentiator.** Slice 1 produces a persuasive report, but every claim in it
 is still level 1 or 2 — measured or inferred. Plenty of tools stop there. What almost nothing does is
@@ -76,6 +76,32 @@ Store real requests so a failure can be re-sent rather than guessed at.
 |---|---|
 | Captures | method, route, query params, allowlisted headers, body |
 | Exit | a `captured_requests` row that replays byte-identically |
+
+**DONE — and built differently than planned.** Requests are reconstructed from **telemetry**, not
+from application middleware. That keeps AfterMerge read-only (no redeploy, no code in the request
+path) and works retroactively on traffic already recorded, including the commits pinned in a
+scenario, which were built long before capture existed.
+
+Two consequences, both stated rather than hidden:
+
+- **Spans carry no request body**, so a mutating request can be recorded but not faithfully
+  reproduced. Those are stored with `replay_safe = False` and a reason, not dropped: "we saw this and
+  cannot replay it" is useful information.
+- **Spans also carry no credential headers**, because OpenTelemetry does not record them by default.
+  Capturing from telemetry is therefore *safer* than a middleware that sees real headers and must be
+  trusted to drop them.
+
+**Gotcha that would have silently corrupted every replay:** the FastAPI instrumentation records
+`http.target` **without** the query string — it reads `/orders` for a request to `/orders?limit=50`.
+Only `http.url` preserves parameters. A capture trusting `http.target` would replay a different
+workload than production served, and `limit` is exactly what drives this regression's magnitude.
+`_split_target` prefers `http.url` and falls back to `http.target`.
+
+Shapes are grouped, not listed: 1,801 identical `GET /orders?limit=50` calls are one row carrying an
+observation count and the slowest exemplar trace, rather than 1,801 near-duplicates.
+
+`replay_safe` is computed by the repository, never accepted from the caller, so the flag and the
+stated reason cannot drift apart.
 
 **Sanitisation is not optional and not an afterthought.** Drop `Authorization` and `Cookie` outright,
 redact configured body fields, and set `replay_safe` explicitly. A request that cannot be proven safe

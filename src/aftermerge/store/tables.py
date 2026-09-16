@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -71,6 +72,46 @@ class Deployment(Base):
 
     def __repr__(self) -> str:
         return f"<Deployment {self.service}@{self.commit_sha} at {self.deployed_at.isoformat()}>"
+
+
+class CapturedRequest(Base):
+    """A production request, reconstructed from telemetry and safe to replay.
+
+    Captured from spans rather than from application middleware. That keeps
+    AfterMerge read-only -- no redeploy, no request-path code, and it works
+    retroactively on traffic that has already happened.
+
+    The trade-off is fidelity: spans carry no request body, so a mutating
+    request can be recorded but not faithfully reproduced. Those are stored with
+    `replay_safe = False` and a stated reason rather than silently dropped,
+    because "we saw this and cannot replay it" is useful information.
+    """
+
+    __tablename__ = "captured_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    incident_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("incidents.id"), nullable=True
+    )
+
+    method: Mapped[str] = mapped_column(String(16))
+    path: Mapped[str] = mapped_column(String(2048))
+    query: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    headers: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+    replay_safe: Mapped[bool] = mapped_column(Boolean, default=False)
+    unreplayable_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    source_trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    observations: Mapped[int] = mapped_column(Integer, default=1)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_duration_ms: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_captured_requests_incident", "incident_id"),)
+
+    def __repr__(self) -> str:
+        return f"<CapturedRequest {self.method} {self.path} safe={self.replay_safe}>"
 
 
 class Incident(Base):

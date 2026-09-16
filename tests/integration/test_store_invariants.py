@@ -233,3 +233,48 @@ def test_invalid_severity_is_rejected(engine) -> None:
             summary="",
             onset_at=datetime.now(UTC),
         )
+
+
+# --- captured requests -------------------------------------------------------
+
+
+def test_replay_safety_is_computed_not_taken_from_the_caller(engine, incident_id) -> None:
+    """A sanitised envelope is not automatically replayable.
+
+    Anything the capture layer flagged unreplayable stays unreplayable, so the
+    two facts cannot drift apart.
+    """
+    from aftermerge.reproducer.envelope import RequestEnvelope
+    from aftermerge.store.repositories import CapturedRequestRepository
+
+    envelope = RequestEnvelope.sanitised(method="POST", path="/orders")
+    assert envelope.replay_safe is True  # sanitised, but still has no body
+
+    with db.session_scope(engine) as session:
+        captured = CapturedRequestRepository(session).record(
+            envelope=envelope,
+            incident_id=incident_id,
+            unreplayable_reason="POST requests carry a body that spans do not record",
+        )
+        assert captured.replay_safe is False
+
+
+def test_replay_only_ever_sees_replayable_requests(engine, incident_id) -> None:
+    from aftermerge.reproducer.envelope import RequestEnvelope
+    from aftermerge.store.repositories import CapturedRequestRepository
+
+    with db.session_scope(engine) as session:
+        repo = CapturedRequestRepository(session)
+        repo.record(envelope=RequestEnvelope.get("/orders", limit=50), incident_id=incident_id)
+        repo.record(
+            envelope=RequestEnvelope.sanitised(method="POST", path="/orders"),
+            incident_id=incident_id,
+            unreplayable_reason="no body in telemetry",
+        )
+
+    with db.session_scope(engine) as session:
+        repo = CapturedRequestRepository(session)
+        assert len(repo.for_incident(incident_id)) == 2
+        replayable = repo.replayable_for_incident(incident_id)
+        assert len(replayable) == 1
+        assert replayable[0].method == "GET"
