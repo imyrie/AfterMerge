@@ -29,9 +29,12 @@ from aftermerge.store.repositories import (
     DeploymentRepository,
     FactRepository,
     IncidentRepository,
+    VerificationRepository,
 )
 from aftermerge.telemetry import catalog, client
 from aftermerge.testgen import context as testgen_context
+from aftermerge.testgen.certify import certify as certify_test
+from aftermerge.testgen.gate import run_gate
 from aftermerge.testgen.generator import TemplateGenerator
 from aftermerge.testgen.writer import write as write_candidate
 
@@ -530,6 +533,126 @@ def testgen() -> None:
     run = f"uv run pytest -m slow {rel}"
     console.print(f"  AFTERMERGE_TEST_REF={ctx.candidate_version} {run}   # must FAIL")
     console.print(f"  AFTERMERGE_TEST_REF={ctx.baseline_version} {run}   # must PASS")
+
+
+@app.command()
+def gate(
+    test: Path = typer.Option(..., help="Path to the generated test file."),
+    good: str = typer.Option(..., help="Commit the test must PASS on."),
+    bad: str = typer.Option(..., help="Commit the test must FAIL on."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
+) -> None:
+    """Check that a test fails on the bad commit and passes on the good one.
+
+    Exits 0 when it discriminates, 1 when it does not, 2 when the gate could not
+    run at all. That exit code is the evidence.
+    """
+    repo_root = Path.cwd()
+    if not (repo_root / test).exists() and not test.exists():
+        console.print(f"[yellow]no such test file: {test}[/yellow]")
+        raise typer.Exit(code=2)
+
+    result = run_gate(test, good_ref=good, bad_ref=bad, repo_root=repo_root)
+
+    if as_json:
+        console.print_json(
+            json.dumps(
+                {
+                    "test_path": str(result.test_path),
+                    "good_ref": good,
+                    "bad_ref": bad,
+                    "at_bad": {
+                        "exit_code": result.at_bad.exit_code,
+                        "satisfied": result.at_bad.satisfied,
+                    },
+                    "at_good": {
+                        "exit_code": result.at_good.exit_code,
+                        "satisfied": result.at_good.satisfied,
+                    },
+                    "passed": result.passed,
+                    "reasons": list(result.reasons),
+                    "summary": result.summary,
+                }
+            )
+        )
+    else:
+        for reason in result.reasons:
+            console.print(f"  - {reason}")
+        colour = "green" if result.passed else "red"
+        console.print(f"\n[{colour}]{result.summary}[/{colour}]")
+
+    raise typer.Exit(code=0 if result.passed else 1)
+
+
+@app.command()
+def certify(
+    max_attempts: int = typer.Option(3, help="Generation attempts before giving up."),
+) -> None:
+    """Generate a regression test and keep it only if it passes the gate.
+
+    A rejected candidate is deleted rather than left on disk: an ungated test in
+    tests/regression/ is precisely the false assurance this is meant to prevent.
+    """
+    engine = _prepared_engine()
+    repo_root = Path.cwd()
+
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        found = IncidentRepository(session).list_recent(limit=1)
+        if not found:
+            console.print("[yellow]no incidents; run `aftermerge detect` first[/yellow]")
+            raise typer.Exit(code=2)
+        incident = found[0]
+
+        replayable = CapturedRequestRepository(session).replayable_for_incident(incident.id)
+        if not replayable:
+            console.print(
+                "[yellow]no replayable captured requests; run `aftermerge capture`[/yellow]"
+            )
+            raise typer.Exit(code=2)
+
+        facts = FactRepository(session).for_incident(incident.id)
+        investigation = investigator_service.investigate(
+            session, incident, repo_root=repo_root, source_prefix=DEFAULT_SOURCE_PREFIX
+        )
+        ctx = testgen_context.build(incident, facts, replayable[0], investigation.correlation)
+        hypotheses = investigation.hypotheses
+
+    if not ctx.discriminates:
+        console.print(
+            "[yellow]the evidence cannot support a discriminating test:[/yellow] "
+            f"baseline {ctx.baseline_spans_per_request:.1f} vs candidate "
+            f"{ctx.candidate_spans_per_request:.1f} operations per request"
+        )
+        raise typer.Exit(code=2)
+
+    console.print("generating and gating (each attempt builds two sandboxes)...\n")
+    outcome = certify_test(ctx, TemplateGenerator(), repo_root=repo_root, max_attempts=max_attempts)
+
+    for index, attempt in enumerate(outcome.attempts, start=1):
+        mark = "accepted" if attempt.passed else "rejected"
+        console.print(f"attempt {index} ({attempt.candidate.generated_by}): [bold]{mark}[/bold]")
+        for reason in attempt.payload.get("reasons", []):
+            console.print(f"  - {reason}")
+
+    if not outcome.succeeded:
+        console.print(f"\n[yellow]no test certified.[/yellow] {outcome.summary}")
+        raise typer.Exit(code=1)
+
+    # Record the gate as level-3 evidence. The verdict comes from the gate
+    # process's exit code, not from this command's opinion of it.
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        if hypotheses:
+            VerificationRepository(session).record(
+                hypothesis_id=hypotheses[0].id,
+                method="regression_test_gate",
+                process=outcome.accepted.process,  # type: ignore[union-attr]
+                metrics=outcome.accepted.payload,  # type: ignore[union-attr]
+                inconclusive_codes=frozenset({2}),
+            )
+
+    rel = outcome.test_path.relative_to(repo_root)  # type: ignore[union-attr]
+    console.print(f"\n[green]certified[/green] {rel}")
+    console.print(outcome.summary)
 
 
 if __name__ == "__main__":

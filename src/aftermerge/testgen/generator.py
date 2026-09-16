@@ -39,6 +39,12 @@ class TestCandidate:
 
 
 class TestGenerator(Protocol):
+    name: str
+    #: Whether repeated calls return the same source. A deterministic generator
+    #: is never retried after a gate rejection: the retry would cost two sandbox
+    #: builds and produce the identical file.
+    deterministic: bool
+
     def generate(self, context: TestContext) -> TestCandidate: ...
 
 
@@ -142,6 +148,7 @@ class TemplateGenerator:
     """Deterministic generation from measured evidence."""
 
     name = "template"
+    deterministic = True
 
     def generate(self, context: TestContext) -> TestCandidate:
         size = context.size_parameter
@@ -217,6 +224,7 @@ class AnthropicGenerator:
     """Generation via the Anthropic API, for cases a template cannot express."""
 
     name = "anthropic"
+    deterministic = False
 
     def __init__(self, client: Any, model: str = "claude-sonnet-5", max_tokens: int = 2000) -> None:
         self._client = client

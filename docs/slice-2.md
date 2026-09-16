@@ -4,7 +4,7 @@
 differential replay, and generate a regression test that provably fails on the bad commit and passes
 on the good one.
 
-**Status:** parts 1-4 done (2026-09-16). Part 5 is still a plan.
+**Status:** complete (2026-09-16). All five parts done.
 
 **Why this slice is the differentiator.** Slice 1 produces a persuasive report, but every claim in it
 is still level 1 or 2 — measured or inferred. Plenty of tools stop there. What almost nothing does is
@@ -247,6 +247,43 @@ The part that makes slice 2 worth more than a prompt.
 | Run at `good_sha` | must exit **zero** |
 | Otherwise | reject the candidate, retry at most twice, then give up and say so |
 
+**DONE.** `aftermerge certify`:
+
+```
+attempt 1 (template): accepted
+  - 8b4fd77: failed as required (exit 1)
+  - cbb4790: passed as required (exit 0)
+
+certified tests/regression/test_orders_get_orders_regression.py
+```
+
+**Only pytest's exit code 1 satisfies the bad side.** This is the load-bearing detail. A test file
+with a syntax error also "fails" at the bad commit, so accepting *any* non-zero code there would
+certify broken files as regression coverage. Exit 1 means tests ran and failed; 2, 3, 4 and 5 mean
+the run never got that far, and each is reported as its own distinct reason.
+
+**Verified in both directions.** Accepting a good test is the easy half; the gate was also fed a
+test that passes everywhere, and rejected it with exit code 1:
+
+```
+8b4fd77: passed, but must fail -- the test does not detect the regression
+cbb4790: not run (the other side had already failed the gate)
+```
+
+**The gate runs as a subprocess, and so `certify` calls it as one.** Running it in-process and then
+shelling out again purely to satisfy `VerificationRepository` would have cost two extra sandbox
+builds for no added truth, so each attempt carries a real `CompletedProcess` from the start.
+
+**A deterministic generator is never retried.** A retry would spend two sandbox builds regenerating
+an identical file. Only a non-deterministic generator gets further attempts, up to the limit.
+
+**A rejected candidate is deleted from disk.** An ungated test sitting in `tests/regression/` is
+precisely the false assurance this design exists to prevent.
+
+**Giving up is a supported outcome.** When no candidate discriminates, the incident keeps its report
+and gets no test, stated plainly. A pipeline that always produces something is less trustworthy than
+one that can say it could not.
+
 A test that passes everywhere proves nothing. A test that fails everywhere proves nothing. Only a test
 that discriminates between the two commits has demonstrated it encodes the regression — and that is
 established by two recorded exit codes, not by the model's opinion of its own output.
@@ -303,3 +340,6 @@ passes at cbb4790 (exit 0).
 
 That block is the whole point of the project. It is the sentence no
 "LLM reads your logs" tool can write.
+
+**Achieved.** The report's level-3 section now carries both verifications, each with the command
+that produced it, because a conclusion nobody else can re-run is a claim rather than a verification.
