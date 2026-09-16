@@ -50,6 +50,7 @@ cbb4790          2.0           12.3     156.4     770.0
 | `make probe` | emit a probe span over OTLP; prints its trace id |
 | `make verify` | show recent spans in ClickHouse |
 | `make ch` | open a ClickHouse shell |
+| `uv run aftermerge deployments list` | show the recorded deploy history |
 | `make lint` | ruff check + format check |
 | `make down` / `make reset` | stop the stack / also wipe volumes |
 
@@ -65,7 +66,9 @@ uv run python scripts/verify_span.py <trace_id>
 ```
 infra/           collector + clickhouse config
 scripts/         phase A probe and verification
-src/aftermerge/  the pipeline (grows from slice 1)
+src/aftermerge/  the pipeline
+  telemetry/     fact catalog: named .sql files + ClickHouse client
+  store/         durable audit trail (Postgres), separate from the demo app's db
 fixtures/        the demo app under test (phase B)
 docs/            plan and per-slice checklists
 ```

@@ -9,6 +9,8 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.30",
     "typer>=0.15",
     "rich>=13.9",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
 ]
 
 [project.scripts]

@@ -15,6 +15,11 @@ ROOT="$(git rev-parse --show-toplevel)"
 SHA="$(git -C "$ROOT" rev-parse --short "$SHA_REF")"
 WT="$ROOT/.worktrees/$SHA"
 
+# Capture what is serving BEFORE anything is replaced. Read from the running
+# container rather than from git, so prev_commit_sha records what was genuinely
+# in production -- not what we assume was there.
+PREV_SHA="$(curl -sf http://localhost:8001/health 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' || true)"
+
 if [ ! -d "$WT" ]; then
   git -C "$ROOT" worktree add --detach --quiet "$WT" "$SHA"
 fi
@@ -38,5 +43,19 @@ until [ "$(gw_version)" = "$SHA" ] && [ "$(ord_version)" = "$SHA" ]; do
   sleep 2
 done
 
-echo "deployed $SHA" >&2
+# Telemetry already splits by service.version. This records what telemetry
+# cannot know: the ordering of commits and the wall-clock changeover, which is
+# what change correlation joins against.
+REPO_URL="$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)"
+for svc in orders gateway; do
+  (cd "$ROOT" && uv run aftermerge deployments record \
+      --service "$svc" \
+      --sha "$SHA" \
+      ${PREV_SHA:+--prev-sha "$PREV_SHA"} \
+      ${REPO_URL:+--repo "$REPO_URL"} \
+      --actor "${USER:-unknown}" >/dev/null) ||
+    echo "WARNING: could not record deploy of $svc (audit trail incomplete)" >&2
+done
+
+echo "deployed $SHA (was ${PREV_SHA:-none})" >&2
 echo "$SHA"
