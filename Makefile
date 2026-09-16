@@ -1,8 +1,9 @@
-.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
-	docker compose up -d
+	@git diff --quiet || echo "WARNING: working tree is dirty; containers will not match $$(git rev-parse --short HEAD)"
+	GIT_SHA=$$(git rev-parse --short HEAD) docker compose up -d
 	@echo "waiting for clickhouse..."
 	@until [ "$$(docker inspect -f '{{.State.Health.Status}}' aftermerge-clickhouse 2>/dev/null)" = "healthy" ]; do sleep 2; done
 	@echo "stack ready -- clickhouse :8123/:9000  otlp :4317/:4318  postgres :5432"
@@ -44,6 +45,9 @@ dance:
 
 facts:
 	uv run aftermerge facts
+
+test:
+	uv run pytest -q
 
 lint:
 	uv run ruff check .

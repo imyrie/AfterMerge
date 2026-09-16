@@ -14,19 +14,51 @@ for the current build checklist.
 | 0 / Phase B | Demo app, instrumentation, regression commit | **done** — verified 2026-09-16 |
 | 0 / Phase C | Load, deploy dance, the query | **done** — verified 2026-09-16 |
 
-## Quickstart (Phase A)
+## Quickstart
 
 Requires Docker and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
-make up          # clickhouse + postgres + otel collector
-make probe       # emit a probe span over OTLP
-make verify      # confirm it reached ClickHouse
+make up            # clickhouse + postgres + otel collector + shopdemo
+make test          # unit tests (no Docker needed)
 ```
 
-`make probe` prints a trace id; `make verify <trace_id>` looks up that specific trace.
-`make ch` opens a ClickHouse shell, `make down` stops the stack, `make reset` also wipes volumes.
+### Reproduce the slice 0 result
+
+```bash
+make truncate                              # clear previous telemetry
+make dance                                 # deploy good sha, load, deploy bad sha, load
+make facts                                 # the evidence
+```
+
+`make dance` defaults to the SHA pair pinned in `scenarios/n_plus_one.yaml`.
+Override with `make dance GOOD=<ref> BAD=<ref> DUR=90s RPS=20`.
+
+Expected output from `make facts`:
+
+```
+version   spans_per_request   p50_ms   p95_ms   p99_ms
+cbb4790          2.0           12.3     156.4     770.0
+8b4fd77         51.0           40.1    1753.1    7516.3
+```
+
+### Other targets
+
+| command | does |
+|---|---|
+| `make probe` | emit a probe span over OTLP; prints its trace id |
+| `make verify` | show recent spans in ClickHouse |
+| `make ch` | open a ClickHouse shell |
+| `make lint` | ruff check + format check |
+| `make down` / `make reset` | stop the stack / also wipe volumes |
+
+To look up one specific trace, call the script directly (Make would read the id
+as a target name):
+
+```bash
+uv run python scripts/verify_span.py <trace_id>
+```
 
 ## Layout
 
