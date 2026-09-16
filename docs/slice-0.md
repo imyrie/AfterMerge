@@ -53,6 +53,8 @@ The exporter created `otel_traces` plus the `otel_traces_trace_id_ts` index mate
 
 **Exit:** `curl localhost:8000/orders` returns JSON.
 
+**DONE.** Seeded 200 customers / 2,000 orders / 8,000 items. Baseline: **2** application queries per request.
+
 **Gotcha:** seed enough data that the N+1 actually hurts. ~50 orders per page with items each. Five rows will not produce a visible regression and the whole demo falls flat.
 
 ---
@@ -62,6 +64,8 @@ Auto-instrumentation: `fastapi`, `httpx`, `asyncpg`. Resource attributes:
 `service.name`, `service.version` (from `GIT_SHA` env), `deployment.environment`.
 
 **Exit:** one request produces **one trace_id** with spans from *both* services, with correct parent/child links. Verify in SQL, not a UI.
+
+**DONE.** One trace, 10 spans, 2 services; gateway root -> httpx client -> orders server -> asyncpg spans. Context propagation confirmed.
 
 **Gotchas:**
 - Context propagation across the gateway→orders hop needs the httpx instrumentor active and the `traceparent` header surviving. This is the most common silent failure — you get two disconnected traces instead of one.
@@ -73,6 +77,9 @@ Auto-instrumentation: `fastapi`, `httpx`, `asyncpg`. Resource attributes:
 An `on_start` hook that walks the call stack, finds the first frame inside your application source tree (skipping `site-packages`), and attaches `code.file.path`, `code.function.name`, `code.line.number`.
 
 **Exit:** database spans carry `SpanAttributes['code.file.path'] = '.../orders/repository.py'`.
+
+**DONE — risk retired.** Emits repo-relative `orders/repository.py`, directly comparable to `git diff --name-only`.
+asyncpg's pool-reset query is correctly left unattributed (no application frame in its stack).
 
 **Why it is separate:** this is the riskiest assumption in the architecture. Deterministic change correlation (intersecting a PR's changed files with span code sites) depends entirely on it. If it proves infeasible, you fall back to time-window correlation — weaker, and far better to learn now than in slice 3.
 
@@ -92,6 +99,9 @@ orders = [await db.get_order(oid) for oid in order_ids]
 ```
 
 **Exit:** two real commit SHAs, and `git diff good..bad` is small and surgical.
+
+**DONE.** good_sha `cbb4790` (main) / bad_sha `8b4fd77` (`regression/001-n-plus-one`).
+One file, 15 insertions / 15 deletions. Measured **2 -> 51** queries per request.
 
 **Gotchas:**
 - Must be genuine git history, not a feature flag or env toggle. The reproducer uses `git worktree` on these SHAs in slice 2, and PR generation needs a real diff.
