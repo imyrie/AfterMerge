@@ -1,4 +1,4 @@
-.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test investigate
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
@@ -52,6 +52,10 @@ investigate:
 
 test:
 	uv run pytest -q
+
+## Includes the slow docker sandbox tests
+test-all:
+	uv run pytest -q -m ''
 
 lint:
 	uv run ruff check .

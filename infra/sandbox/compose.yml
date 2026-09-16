@@ -1,0 +1,71 @@
+# One ephemeral shopdemo at one commit.
+#
+# Started by src/aftermerge/reproducer/sandbox.py, which supplies every REPRO_*
+# variable. Not intended to be run by hand.
+
+name: ${REPRO_PROJECT}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: aftermerge
+      POSTGRES_PASSWORD: aftermerge
+      POSTGRES_DB: shopdemo
+    volumes:
+      # Schema comes from the commit under test (it is part of the application);
+      # the seed comes from the reproducer, so both sides see identical data.
+      - ${REPRO_SCHEMA}:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ${REPRO_SEED}:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aftermerge -d shopdemo"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.137.0
+    command: ["--config=/etc/otel/config.yaml"]
+    environment:
+      REPRO_DATABASE: ${REPRO_DATABASE}
+    volumes:
+      - ${REPRO_COLLECTOR_CONFIG}:/etc/otel/config.yaml:ro
+    networks:
+      default:
+      shared:
+
+  orders:
+    image: shopdemo:${REPRO_SHA}
+    command: ["uvicorn", "orders.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      GIT_SHA: ${REPRO_SHA}
+      DEPLOY_ENV: repro
+      DATABASE_URL: postgresql://aftermerge:aftermerge@postgres:5432/shopdemo
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://collector:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      collector:
+        condition: service_started
+
+  gateway:
+    image: shopdemo:${REPRO_SHA}
+    command: ["uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      GIT_SHA: ${REPRO_SHA}
+      DEPLOY_ENV: repro
+      ORDERS_URL: http://orders:8000
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://collector:4317
+    ports:
+      # No fixed host port. Two sandboxes, or a sandbox beside the dev stack,
+      # would otherwise collide on 8000. The caller reads the assigned port back
+      # with `docker compose port`.
+      - "8000"
+    depends_on:
+      - orders
+
+networks:
+  default:
+  shared:
+    name: aftermerge_default
+    external: true

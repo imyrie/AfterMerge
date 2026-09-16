@@ -13,6 +13,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "numpy>=2.1",
     "scipy>=1.14",
+    "httpx>=0.28",
 ]
 
 [project.scripts]
@@ -55,3 +56,7 @@ files = ["src/aftermerge"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Sandbox tests build and run containers; excluded by default so the fast suite
+# stays usable for iteration. `make test-all` runs everything.
+addopts = "-m 'not slow'"
+markers = ["slow: builds and runs docker sandboxes (tens of seconds)"]

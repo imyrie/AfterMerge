@@ -1,0 +1,38 @@
+# Sandbox collector: writes replay traces to their OWN ClickHouse database.
+#
+# Isolation is structural, not a query convention. Production evidence lives in
+# `otel`; a replay cannot contaminate it even if someone forgets a WHERE clause,
+# because the rows are not in that database at all.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    # Far shorter than production's 5s: a replay is seconds long and the caller
+    # is waiting to query the result.
+    timeout: 1s
+    send_batch_size: 256
+
+exporters:
+  clickhouse:
+    endpoint: tcp://aftermerge-clickhouse:9000?dial_timeout=10s
+    database: ${env:REPRO_DATABASE}
+    username: default
+    password: ""
+    create_schema: true
+    traces_table_name: otel_traces
+    timeout: 10s
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [clickhouse]
+  telemetry:
+    logs:
+      level: warn

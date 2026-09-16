@@ -18,6 +18,10 @@ for the current build checklist.
 | 1 / Evidence | Declarative fact set recorded per incident | **done** |
 | 1 / Correlation | Changed files ∩ span code sites → hypotheses | **done** |
 | 1 / Report | `aftermerge investigate` + e2e assertions | **done** |
+| 2 / Sandbox | Ephemeral app at any commit, isolated telemetry | **done** |
+| 2 / Capture | Sanitised production request envelopes | not started |
+| 2 / Replay | Differential replay → first level-3 verification | not started |
+| 2 / Testgen | Generated test gated on fail@bad / pass@good | not started |
 
 ## Quickstart
 
@@ -59,6 +63,7 @@ cbb4790          2.0           12.3     156.4     770.0
 | `uv run aftermerge detect` | compare the last two deployed versions; open an incident if warranted |
 | `uv run aftermerge incidents` | list detected incidents and their evidence |
 | `make investigate` | detect, correlate with the diff, write `incident-report.md` |
+| `make test` / `make test-all` | fast suite / including the slow docker sandbox tests |
 | `make lint` | ruff check + format check |
 | `make down` / `make reset` | stop the stack / also wipe volumes |
 
