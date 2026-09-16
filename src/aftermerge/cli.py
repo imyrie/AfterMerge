@@ -13,8 +13,14 @@ from aftermerge.detector import service as detector_service
 from aftermerge.detector import windows
 from aftermerge.detector.rules import SLO
 from aftermerge.investigator import service as investigator_service
-from aftermerge.investigator.code_map import DEFAULT_SOURCE_PREFIX, changed_files
+from aftermerge.investigator.code_map import (
+    DEFAULT_SOURCE_PREFIX,
+    changed_files,
+    diff_for,
+)
+from aftermerge.patcher.fix import propose_fix
 from aftermerge.patcher.patch import Patch, PatchRejected
+from aftermerge.patcher.proposer import PatchContext, RevertProposer
 from aftermerge.patcher.validate import validate as validate_patch
 from aftermerge.report import render as report_render
 from aftermerge.reproducer import capture as capture_mod
@@ -751,6 +757,86 @@ def validate(
         console.print(f"\n[{colour}]{result.summary}[/{colour}]")
 
     raise typer.Exit(code=0 if result.passed else 1)
+
+
+@app.command()
+def fix(
+    max_attempts: int = typer.Option(3, help="Proposals before giving up."),
+) -> None:
+    """Propose a fix and keep it only if validation accepts it.
+
+    Defaults to a revert, which is a legitimate answer rather than a fallback:
+    restoring the previous implementation always removes the regression, and
+    costs only whatever else the commit was trying to do.
+    """
+    engine = _prepared_engine()
+    repo_root = Path.cwd()
+
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        found = IncidentRepository(session).list_recent(limit=1)
+        if not found:
+            console.print("[yellow]no incidents; run `aftermerge detect` first[/yellow]")
+            raise typer.Exit(code=2)
+        incident = found[0]
+        replayable = CapturedRequestRepository(session).replayable_for_incident(incident.id)
+        if not replayable:
+            console.print(
+                "[yellow]no replayable captured requests; run `aftermerge capture`[/yellow]"
+            )
+            raise typer.Exit(code=2)
+        facts = FactRepository(session).for_incident(incident.id)
+        ctx = testgen_context.build(incident, facts, replayable[0], None)
+        hypotheses = investigator_service.investigate(
+            session, incident, repo_root=repo_root, source_prefix=DEFAULT_SOURCE_PREFIX
+        ).hypotheses
+
+    changed = changed_files(
+        incident.baseline_version, incident.candidate_version, repo_root=repo_root
+    )
+    patch_context = PatchContext(
+        good_ref=incident.baseline_version,
+        bad_ref=incident.candidate_version,
+        changed_files=tuple(c.repo_path for c in changed),
+        code_site=ctx.code_site,
+        baseline_spans_per_request=ctx.baseline_spans_per_request,
+        candidate_spans_per_request=ctx.candidate_spans_per_request,
+        causing_diff=diff_for(
+            incident.baseline_version, incident.candidate_version, repo_root=repo_root
+        ),
+    )
+
+    console.print("proposing and validating (each attempt builds three sandboxes)...\n")
+    outcome = propose_fix(
+        patch_context, RevertProposer(repo_root), repo_root=repo_root, max_attempts=max_attempts
+    )
+
+    for index, attempt in enumerate(outcome.attempts, start=1):
+        mark = "accepted" if attempt.accepted else "rejected"
+        label = f"{attempt.patch.origin}, {attempt.patch.strategy}"
+        console.print(f"attempt {index} ({label}): [bold]{mark}[/bold]")
+        for check in attempt.payload.get("checks", []):
+            colour = {"passed": "green", "failed": "red", "skipped": "yellow"}[check["status"]]
+            console.print(
+                f"  [{colour}]{check['status']:8}[/{colour}] {check['name']}: {check['detail']}"
+            )
+
+    if not outcome.succeeded:
+        console.print(f"\n[yellow]no fix validated.[/yellow] {outcome.summary}")
+        raise typer.Exit(code=1)
+
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        if hypotheses:
+            VerificationRepository(session).record(
+                hypothesis_id=hypotheses[0].id,
+                method="patch_validation",
+                process=outcome.accepted.process,  # type: ignore[union-attr]
+                metrics=outcome.accepted.payload,  # type: ignore[union-attr]
+                inconclusive_codes=frozenset({2}),
+            )
+
+    rel = outcome.patch_path.relative_to(repo_root)  # type: ignore[union-attr]
+    console.print(f"\n[green]validated[/green] {rel} ({outcome.accepted.patch.strategy})")  # type: ignore[union-attr]
+    console.print(outcome.summary)
 
 
 if __name__ == "__main__":

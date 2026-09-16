@@ -3,7 +3,7 @@
 **Goal:** close the loop. Propose a fix, prove it works without breaking anything, and open a pull
 request whose body is the evidence.
 
-**Status:** part 2 done (2026-09-16). Parts 1 and 3 remain a plan.
+**Status:** parts 1 and 2 done (2026-09-16). Part 3 remains a plan.
 
 **What makes this slice hard is not writing the patch.** A language model will happily produce a
 plausible diff. The work is establishing that the diff is *correct* — and the regression test alone
@@ -32,6 +32,34 @@ Two legitimate strategies, and they are not equivalent:
 The patcher should attempt a repair and fall back to a revert, and **the PR must state which it
 did**. "I reverted your change" and "I rewrote your change" ask very different things of a reviewer,
 and blurring them is how an automated PR loses trust.
+
+**DONE.** `aftermerge fix` proposes and validates in one loop:
+
+```
+attempt 1 (revert, revert): accepted
+  passed   patch_regression_test: passes at c82d515
+  skipped  patch_suite: no suite command configured
+  passed   patch_work_restored: 2.0 vs 2.0 database operations per request
+  passed   patch_response_equivalence: identical (17503 bytes, sha256 ea0d29b720d0)
+
+validated .aftermerge/candidate.patch (revert)
+```
+
+**Both proposers return whole file contents, and git computes the diff.** Models are unreliable at
+emitting valid unified diffs -- line counts, context, offsets -- and a malformed patch fails at
+`git apply` for reasons unrelated to whether the fix was right. Letting git produce the diff from
+proposed contents removes that failure mode entirely, and the revert proposer uses the same path.
+
+**The deterministic default is a revert, and that is a real answer rather than a fallback.**
+Restoring the previous implementation always removes the regression; the only cost is whatever else
+the commit was trying to do. For a commit that did nothing else, it *is* the correct fix. The
+strategy is recorded on the patch and stated in the output, because "I reverted your change" and
+"I rewrote your change" ask different things of a reviewer.
+
+**The loop never decides whether a patch is good.** It shells out to `aftermerge validate` and takes
+the exit code, exactly as `certify` does with the gate. A deterministic proposer is not retried --
+three sandbox builds to regenerate an identical diff -- and a rejected candidate is deleted rather
+than left in `.aftermerge/`.
 
 ### Constrain the blast radius
 
