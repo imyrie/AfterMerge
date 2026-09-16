@@ -6,8 +6,11 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from aftermerge.detector import service as detector_service
+from aftermerge.detector import windows
+from aftermerge.detector.rules import SLO
 from aftermerge.store import db as store_db
-from aftermerge.store.repositories import DeploymentRepository
+from aftermerge.store.repositories import DeploymentRepository, FactRepository, IncidentRepository
 from aftermerge.telemetry import catalog, client
 
 app = typer.Typer(
@@ -134,3 +137,99 @@ def facts(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command()
+def detect(
+    service: str = typer.Option("orders", help="Service whose deploy is under test."),
+    route_service: str = typer.Option("gateway", help="Service serving the user-facing route."),
+    route: str = typer.Option("GET /orders", help="Server span name for the route."),
+    p95_slo_ms: float = typer.Option(500.0, help="Latency objective for the route."),
+    lookback_minutes: int = typer.Option(120, help="How far back to read telemetry."),
+    min_samples: int = typer.Option(100, help="Required samples per side."),
+) -> None:
+    """Compare the two most recently deployed versions and open an incident if warranted."""
+    engine = _prepared_engine()
+    slo = SLO(route=route, p95_ms=p95_slo_ms)
+
+    try:
+        with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+            outcome = detector_service.detect(
+                session,
+                service=service,
+                route_service=route_service,
+                slo=slo,
+                lookback_minutes=lookback_minutes,
+                min_samples=min_samples,
+            )
+            incident_id = outcome.incident.id if outcome.incident else None
+    except windows.NoComparisonAvailable as exc:
+        console.print(f"[yellow]cannot compare:[/yellow] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    c = outcome.detection.comparison
+    table = Table(title="comparison", title_justify="left", header_style="bold")
+    for column in ("", "baseline", "candidate"):
+        table.add_column(column)
+    table.add_row("version", outcome.window.baseline_version, outcome.window.candidate_version)
+    table.add_row("samples", str(c.baseline_n), str(c.candidate_n))
+    table.add_row("median ms", f"{c.baseline_median_ms:.1f}", f"{c.candidate_median_ms:.1f}")
+    table.add_row("p95 ms", f"{c.baseline_p95_ms:.1f}", f"{c.candidate_p95_ms:.1f}")
+    console.print(table)
+
+    amp = outcome.detection.amplification
+    if amp is not None:
+        console.print(
+            f"\ndb spans/req   {amp.baseline_per_request:.1f} -> "
+            f"{amp.candidate_per_request:.1f}  ({amp.ratio:.1f}x)"
+        )
+    console.print(f"\np95 ratio      {c.ratio:.2f}x")
+    console.print(f"Mann-Whitney p {c.p_value:.3e}")
+    console.print(f"effect size    {c.effect_size:.3f}")
+
+    colour = "red" if outcome.detection.triggered else "green"
+    if outcome.detection.insufficient_data:
+        colour = "yellow"
+    console.print(f"\n[{colour}]{outcome.detection.headline}[/{colour}]")
+    for reason in outcome.detection.reasons:
+        console.print(f"  - {reason}")
+
+    if incident_id:
+        console.print(f"\nincident {incident_id} ({outcome.fact_count} facts recorded)")
+
+
+@app.command()
+def incidents(limit: int = typer.Option(10, help="Maximum rows.")) -> None:
+    """List detected incidents and their evidence counts."""
+    engine = _prepared_engine()
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        rows = IncidentRepository(session).list_recent(limit=limit)
+        rendered = [
+            (
+                row.detected_at.strftime("%Y-%m-%d %H:%M"),
+                f"{row.service} {row.route}",
+                row.severity,
+                f"{row.baseline_version} -> {row.candidate_version}",
+                str(len(FactRepository(session).for_incident(row.id))),
+                row.summary,
+            )
+            for row in rows
+        ]
+
+    if not rendered:
+        console.print("[yellow]no incidents recorded[/yellow]")
+        return
+
+    table = Table(title="incidents", title_justify="left", header_style="bold")
+    for column in ("detected", "target", "severity", "versions", "facts"):
+        table.add_column(column, no_wrap=True)
+    for row in rendered:
+        table.add_row(*row[:5])
+    console.print(table)
+
+    # Summaries concatenate every triggering reason, so they are printed as prose
+    # beneath the table rather than folded into a column too narrow to read.
+    for row in rendered:
+        console.print(f"\n[bold]{row[1]}[/bold] ({row[2]})")
+        for reason in row[5].split("; "):
+            console.print(f"  - {reason}")

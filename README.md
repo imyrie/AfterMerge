@@ -13,6 +13,10 @@ for the current build checklist.
 | 0 / Phase A | Storage + telemetry pipe | **done** — verified 2026-09-16 |
 | 0 / Phase B | Demo app, instrumentation, regression commit | **done** — verified 2026-09-16 |
 | 0 / Phase C | Load, deploy dance, the query | **done** — verified 2026-09-16 |
+| 1 / Store | Audit trail with enforced trust levels | **done** |
+| 1 / Detector | Version windows, statistics, trigger rules | **done** |
+| 1 / Correlation | Changed files ∩ span code sites → hypotheses | not started |
+| 1 / Report | `aftermerge investigate` + e2e assertions | not started |
 
 ## Quickstart
 
@@ -51,6 +55,8 @@ cbb4790          2.0           12.3     156.4     770.0
 | `make verify` | show recent spans in ClickHouse |
 | `make ch` | open a ClickHouse shell |
 | `uv run aftermerge deployments list` | show the recorded deploy history |
+| `uv run aftermerge detect` | compare the last two deployed versions; open an incident if warranted |
+| `uv run aftermerge incidents` | list detected incidents and their evidence |
 | `make lint` | ruff check + format check |
 | `make down` / `make reset` | stop the stack / also wipe volumes |
 

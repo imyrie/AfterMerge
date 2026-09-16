@@ -11,6 +11,8 @@ dependencies = [
     "rich>=13.9",
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3.2",
+    "numpy>=2.1",
+    "scipy>=1.14",
 ]
 
 [project.scripts]
@@ -24,6 +26,7 @@ dev = [
     "ruff>=0.9",
     "pyyaml>=6.0",
     "types-pyyaml>=6.0",
+    "scipy-stubs>=1.14",
 ]
 
 [build-system]
