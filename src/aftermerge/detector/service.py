@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 from aftermerge.detector import windows
 from aftermerge.detector.rules import SLO, Amplification, Detection, evaluate
 from aftermerge.detector.stats import DEFAULT_MIN_SAMPLES, Comparison, compare
-from aftermerge.store.repositories import FactRepository, IncidentRepository
+from aftermerge.investigator import evidence
+from aftermerge.store.repositories import IncidentRepository
 from aftermerge.store.tables import Incident
 from aftermerge.telemetry import client
 
@@ -148,14 +149,6 @@ def detect(
     if not detection.triggered:
         return DetectionOutcome(window=window, detection=detection, incident=None, fact_count=0)
 
-    quantiles = client.run(
-        "latency_quantiles",
-        client=ch,
-        service=route_service,
-        route=slo.route,
-        lookback_minutes=lookback_minutes,
-    )
-
     incident = IncidentRepository(session).open(
         service=service,
         route=slo.route,
@@ -167,27 +160,29 @@ def detect(
         deployment_id=window.deployment_id,
     )
 
-    facts = FactRepository(session)
-    facts.record(
-        incident_id=incident.id,
-        kind="route_duration_samples",
-        result=durations,
-        value=comparison.candidate_p95_ms,
-        unit="ms",
-    )
-    facts.record(
-        incident_id=incident.id,
-        kind="route_latency_quantiles",
-        result=quantiles,
-        value=_scalar_for(quantiles, window.candidate_version, "p95_ms"),
-        unit="ms",
-    )
-    facts.record(
-        incident_id=incident.id,
-        kind="db_spans_per_request",
-        result=spans,
-        value=_scalar_for(spans, window.candidate_version, "spans_per_request"),
-        unit="spans",
+    # The duration samples are passed through rather than re-queried: they are
+    # the observation the verdict was computed from, so the incident should cite
+    # exactly those rows.
+    facts = evidence.gather(
+        session,
+        incident,
+        ch=ch,
+        route_service=route_service,
+        lookback_minutes=lookback_minutes,
+        extra=[
+            (
+                evidence.EvidenceSpec(
+                    kind="route_duration_samples",
+                    query_name="route_durations",
+                    value_column="duration_ms",
+                    unit="ms p95",
+                    aggregate="p95",
+                ),
+                durations,
+            )
+        ],
     )
 
-    return DetectionOutcome(window=window, detection=detection, incident=incident, fact_count=3)
+    return DetectionOutcome(
+        window=window, detection=detection, incident=incident, fact_count=len(facts)
+    )

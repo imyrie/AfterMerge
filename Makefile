@@ -1,4 +1,4 @@
-.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test investigate
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
@@ -45,6 +45,10 @@ dance:
 
 facts:
 	uv run aftermerge facts
+
+## Detect a regression and write an evidence-backed report
+investigate:
+	uv run aftermerge investigate --output incident-report.md
 
 test:
 	uv run pytest -q

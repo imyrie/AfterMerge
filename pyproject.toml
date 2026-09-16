@@ -43,6 +43,10 @@ src = ["src", "scripts"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.flake8-bugbear]
+# Typer's API requires these in argument defaults; B008 is a false positive here.
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

@@ -7,9 +7,9 @@ evidence that supports it.
 |---|---|---|
 | 1 | Store: audit trail + trust-level invariants | **done** |
 | 2 | Detector: windows, statistics, rules | **done** |
-| 3 | Evidence gathering into facts | partial — detector records 3 facts |
-| 4 | Change correlation → ranked hypotheses | not started |
-| 5 | Report + `aftermerge investigate` + e2e assertions | not started |
+| 3 | Evidence gathering into facts | **done** |
+| 4 | Change correlation → ranked hypotheses | **done** |
+| 5 | Report + `aftermerge investigate` + e2e assertions | **done** |
 
 ---
 
@@ -83,3 +83,56 @@ critical regression detected
 ```
 
 It names the responsible file without being told where to look, from telemetry and SQL alone.
+
+
+---
+
+## Parts 3-5 — evidence, correlation, report
+
+### Part 3: evidence
+
+One declarative set of queries (`investigator/evidence.py`), run against the incident window and
+persisted as facts carrying the statement and parameters that produced them. The detector was
+refactored to use it rather than recording facts inline, so there is a single place that decides
+what evidence an incident carries.
+
+`route_durations` returns raw per-request samples, so its headline number is a p95 rather than
+whichever row came back first — a distinction that briefly produced a misleading 198ms in the
+report where the true p95 was 51ms.
+
+### Part 4: correlation
+
+The join that all the `code.file.path` work was for. Spans report paths relative to the deployed
+source root (`orders/repository.py`); git reports repository paths
+(`fixtures/shopdemo/orders/repository.py`). `code_map` strips the configured prefix so both sides
+share one coordinate system — fuzzy path matching would turn a deterministic join back into a guess.
+
+Three outcomes, all reported honestly:
+
+| situation | basis | score |
+|---|---|---|
+| new work, explained by the diff | `code_site_overlap` | fraction of new work attributed |
+| new work, **not** explained by the diff | `code_site_overlap` | 0.0, and the statement says so |
+| no new work at all | `temporal_only` | capped at 0.35 — timing alone is weak evidence |
+
+### Part 5: report
+
+Markdown organised by trust level, always showing all three **including the empty ones**, so a
+reader can see which claims are measured, which inferred, and which actually verified. Slice 1
+ends at inference, so level 3 reads:
+
+> **None.** Nothing above has been reproduced or verified by execution.
+
+The hypothesis score is labelled "explains 100% of the new work", not "100% confidence". The number
+is a measured fraction of attributed work; calling it confidence would overstate what was computed.
+
+### Verified end to end
+
+```
+**explains 100% of the new work** — Commit 8b4fd77 ('Simplify order item lookup') modified
+orders/repository.py, which accounts for 49 of the 49 additional database operations per request.
+```
+
+`tests/e2e/test_scenario_n_plus_one.py` asserts this against `scenarios/n_plus_one.yaml`: the
+regression is detected, amplification matches the recorded 2 → 51, the responsible file is named,
+hypotheses cite evidence, and nothing is claimed as verified.

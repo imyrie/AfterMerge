@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -9,6 +11,9 @@ from rich.table import Table
 from aftermerge.detector import service as detector_service
 from aftermerge.detector import windows
 from aftermerge.detector.rules import SLO
+from aftermerge.investigator import service as investigator_service
+from aftermerge.investigator.code_map import DEFAULT_SOURCE_PREFIX
+from aftermerge.report import render as report_render
 from aftermerge.store import db as store_db
 from aftermerge.store.repositories import DeploymentRepository, FactRepository, IncidentRepository
 from aftermerge.telemetry import catalog, client
@@ -233,3 +238,61 @@ def incidents(limit: int = typer.Option(10, help="Maximum rows.")) -> None:
         console.print(f"\n[bold]{row[1]}[/bold] ({row[2]})")
         for reason in row[5].split("; "):
             console.print(f"  - {reason}")
+
+
+@app.command()
+def investigate(
+    service: str = typer.Option("orders", help="Service whose deploy is under test."),
+    route_service: str = typer.Option("gateway", help="Service serving the user-facing route."),
+    route: str = typer.Option("GET /orders", help="Server span name for the route."),
+    p95_slo_ms: float = typer.Option(500.0, help="Latency objective for the route."),
+    lookback_minutes: int = typer.Option(120, help="How far back to read telemetry."),
+    source_prefix: str = typer.Option(
+        DEFAULT_SOURCE_PREFIX,
+        help="Repo path prefix stripped to match span code.file.path values.",
+    ),
+    output: Path | None = typer.Option(None, help="Write the markdown report here."),
+    detect_first: bool = typer.Option(True, help="Run detection when no incident exists yet."),
+) -> None:
+    """Detect, gather evidence, correlate with the deploy, and write a report."""
+    engine = _prepared_engine()
+    repo_root = Path.cwd()
+
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        existing = IncidentRepository(session).list_recent(limit=1)
+        incident = existing[0] if existing else None
+
+        if incident is None:
+            if not detect_first:
+                console.print(
+                    "[yellow]no incidents recorded; run `aftermerge detect` first[/yellow]"
+                )
+                raise typer.Exit(code=2)
+            try:
+                outcome = detector_service.detect(
+                    session,
+                    service=service,
+                    route_service=route_service,
+                    slo=SLO(route=route, p95_ms=p95_slo_ms),
+                    lookback_minutes=lookback_minutes,
+                )
+            except windows.NoComparisonAvailable as exc:
+                console.print(f"[yellow]cannot compare:[/yellow] {exc}")
+                raise typer.Exit(code=2) from exc
+            if outcome.incident is None:
+                console.print(f"[green]{outcome.detection.headline}[/green]")
+                for reason in outcome.detection.reasons:
+                    console.print(f"  - {reason}")
+                raise typer.Exit(code=0)
+            incident = outcome.incident
+
+        investigation = investigator_service.investigate(
+            session, incident, repo_root=repo_root, source_prefix=source_prefix
+        )
+        markdown = report_render.render(investigation)
+
+    if output is not None:
+        output.write_text(markdown)
+        console.print(f"report written to {output}")
+    else:
+        console.print(markdown)
