@@ -13,7 +13,9 @@ from aftermerge.detector import service as detector_service
 from aftermerge.detector import windows
 from aftermerge.detector.rules import SLO
 from aftermerge.investigator import service as investigator_service
-from aftermerge.investigator.code_map import DEFAULT_SOURCE_PREFIX
+from aftermerge.investigator.code_map import DEFAULT_SOURCE_PREFIX, changed_files
+from aftermerge.patcher.patch import Patch, PatchRejected
+from aftermerge.patcher.validate import validate as validate_patch
 from aftermerge.report import render as report_render
 from aftermerge.reproducer import capture as capture_mod
 from aftermerge.reproducer.differential import (
@@ -653,6 +655,102 @@ def certify(
     rel = outcome.test_path.relative_to(repo_root)  # type: ignore[union-attr]
     console.print(f"\n[green]certified[/green] {rel}")
     console.print(outcome.summary)
+
+
+def _scenario_verify_options(repo_root: Path) -> tuple[tuple[str, ...], list[str] | None]:
+    """Normalisations and suite command, as declared in the scenario file."""
+    import yaml
+
+    path = repo_root / "scenarios" / "n_plus_one.yaml"
+    if not path.is_file():
+        return (), None
+    data = yaml.safe_load(path.read_text()) or {}
+    verify_block = data.get("verify") or {}
+    return tuple(verify_block.get("normalisations") or ()), verify_block.get("suite_command")
+
+
+@app.command()
+def validate(
+    patch: Path = typer.Option(..., help="Unified diff to validate."),
+    strategy: str = typer.Option("repair", help="repair or revert -- stated in the PR."),
+    origin: str = typer.Option("hand-written", help="What produced this patch."),
+    repeat: int = typer.Option(10, help="Requests per side when measuring work."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
+) -> None:
+    """Establish that a candidate fix removes the fault and changes nothing else.
+
+    Exits 0 when the fix is validated, 1 when it is rejected, 2 when validation
+    could not run. The regression test alone is not enough: a patch that returns
+    fewer rows satisfies it and is broken, so responses are compared too.
+    """
+    engine = _prepared_engine()
+    repo_root = Path.cwd()
+
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        found = IncidentRepository(session).list_recent(limit=1)
+        if not found:
+            console.print("[yellow]no incidents; run `aftermerge detect` first[/yellow]")
+            raise typer.Exit(code=2)
+        incident = found[0]
+        replayable = CapturedRequestRepository(session).replayable_for_incident(incident.id)
+        if not replayable:
+            console.print(
+                "[yellow]no replayable captured requests; run `aftermerge capture`[/yellow]"
+            )
+            raise typer.Exit(code=2)
+        captured = replayable[0]
+        facts = FactRepository(session).for_incident(incident.id)
+        ctx = testgen_context.build(incident, facts, captured, None)
+
+    test_path = Path("tests") / "regression" / f"{ctx.module_name}.py"
+    if not (repo_root / test_path).is_file():
+        console.print(
+            f"[yellow]no certified test at {test_path}; run `aftermerge certify`[/yellow]"
+        )
+        raise typer.Exit(code=2)
+
+    allowed = frozenset(
+        c.repo_path
+        for c in changed_files(
+            incident.baseline_version, incident.candidate_version, repo_root=repo_root
+        )
+    )
+    normalisations, suite_command = _scenario_verify_options(repo_root)
+    envelope = RequestEnvelope(
+        method=captured.method, path=captured.path, query=dict(captured.query), replay_safe=True
+    )
+
+    try:
+        candidate = Patch.from_file(patch, strategy=strategy, origin=origin)
+        result = validate_patch(
+            candidate,
+            envelope=envelope,
+            good_ref=incident.baseline_version,
+            bad_ref=incident.candidate_version,
+            test_path=test_path,
+            repo_root=repo_root,
+            allowed_files=allowed,
+            normalisations=normalisations,
+            suite_command=suite_command,
+            repeat=repeat,
+        )
+    except PatchRejected as exc:
+        if as_json:
+            console.print_json(json.dumps({"passed": False, "rejected": str(exc)}))
+        else:
+            console.print(f"[red]patch rejected before running:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if as_json:
+        console.print_json(json.dumps(result.as_dict()))
+    else:
+        for check in result.checks:
+            colour = {"passed": "green", "failed": "red", "skipped": "yellow"}[check.status]
+            console.print(f"  [{colour}]{check.status:8}[/{colour}] {check.name}: {check.detail}")
+        colour = "green" if result.passed else "red"
+        console.print(f"\n[{colour}]{result.summary}[/{colour}]")
+
+    raise typer.Exit(code=0 if result.passed else 1)
 
 
 if __name__ == "__main__":

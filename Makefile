@@ -1,4 +1,4 @@
-.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
@@ -45,6 +45,10 @@ dance:
 
 facts:
 	uv run aftermerge facts
+
+## Validate a candidate fix: make validate PATCH=<file> [STRATEGY=revert]
+validate:
+	uv run aftermerge validate --patch $(PATCH) --strategy $(or $(STRATEGY),repair)
 
 ## Generate a regression test and keep it only if it fails@bad and passes@good
 certify:

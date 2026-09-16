@@ -152,3 +152,39 @@ def test_the_regression_reproduces_differentially() -> None:
     assert outcome.good.db_spans_per_request == pytest.approx(2.0, rel=0.05)
     assert outcome.bad.db_spans_per_request == pytest.approx(51.0, rel=0.05)
     assert outcome.reproduced
+
+
+def test_a_patch_that_games_the_regression_test_is_rejected() -> None:
+    """The oracle the regression test cannot provide.
+
+    cheat.patch makes database work constant -- passing the scaling assertion --
+    by returning every order with no line items. Without response equivalence
+    this patch would be certified and shipped.
+    """
+    from aftermerge.patcher.equivalence import compare, snapshot
+    from aftermerge.patcher.patch import Patch
+    from aftermerge.patcher.tree import patched_commit
+    from aftermerge.reproducer.replay import replay
+
+    patch = Patch.from_file(
+        ROOT / "fixtures" / "regressions" / "001-n-plus-one" / "cheat.patch",
+        strategy="repair",
+        origin="deliberate-cheat",
+    )
+    envelope = RequestEnvelope.get("/orders", limit=50)
+
+    with patched_commit(patch, base_ref=BAD_SHA, repo_root=ROOT) as patched_sha:
+        with sandbox("cbb4790", repo_root=ROOT) as good_box:
+            good_work = replay(good_box, envelope, repeat=5)
+            good_response = snapshot(good_box, envelope)
+        with sandbox(patched_sha, repo_root=ROOT) as patched_box:
+            patched_work = replay(patched_box, envelope, repeat=5)
+            patched_response = snapshot(patched_box, envelope)
+
+    # The work metric is satisfied -- indeed improved on.
+    assert patched_work.db_spans_per_request <= good_work.db_spans_per_request
+
+    # And the response is wrong.
+    result = compare(good_response, patched_response)
+    assert not result.equivalent
+    assert "body length" in result.summary

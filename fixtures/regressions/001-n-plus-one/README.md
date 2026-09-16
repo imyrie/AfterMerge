@@ -33,3 +33,25 @@ inferring from timestamps.
 "Simplify order item lookup" is deliberate. A regression labelled as a regression
 would let the investigator cheat; the demo is only meaningful if the conclusion
 comes from telemetry rather than from reading the commit subject.
+
+## Candidate fixes
+
+| file | strategy | expected outcome |
+|---|---|---|
+| `fix.patch` | revert | validates: 2.0 vs 2.0 operations, byte-identical responses |
+| `cheat.patch` | "repair" | **rejected** by response equivalence |
+
+`cheat.patch` exists to prove the validator is worth having. It stops the per-order query by
+returning every order with an empty `items` list, so database work becomes *constant* -- better than
+the baseline -- and the certified regression test passes. Two of the three substantive checks go
+green on a patch that silently drops every line item from the response:
+
+```
+passed   patch_regression_test: passes at the patched commit
+passed   patch_work_restored: 2.0 vs 1.0 database operations per request
+failed   patch_response_equivalence: body length 17503 became 6320 (-11183 bytes)
+```
+
+This is Goodhart's law inside the pipeline: the regression test became the target, so it stopped
+measuring what it measured. The test is necessary and not sufficient, which is why validation also
+requires the patched build to answer byte-identically to the known-good one.

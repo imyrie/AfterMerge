@@ -41,3 +41,15 @@ expect:
     good: 156.4
     bad: 1753.1
   latency_ratio_min: 5.0
+
+# How a candidate fix is validated (slice 3).
+verify:
+  # Regex substitutions applied to response bodies before comparing the patched
+  # build against the known-good one. Declared here, not buried in the comparison
+  # code, so the set of tolerated differences stays reviewable and cannot quietly
+  # widen. Empty for this scenario: the deterministic sandbox seed makes two
+  # independent sandboxes return byte-identical bodies.
+  normalisations: []
+  # shopdemo has no tests of its own, so there is no suite to re-run. The check
+  # is recorded as skipped rather than silently counted as passing.
+  suite_command: null

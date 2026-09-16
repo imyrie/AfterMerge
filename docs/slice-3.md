@@ -3,7 +3,7 @@
 **Goal:** close the loop. Propose a fix, prove it works without breaking anything, and open a pull
 request whose body is the evidence.
 
-**Status:** not started. Every table below is an exit condition, not a result.
+**Status:** part 2 done (2026-09-16). Parts 1 and 3 remain a plan.
 
 **What makes this slice hard is not writing the patch.** A language model will happily produce a
 plausible diff. The work is establishing that the diff is *correct* — and the regression test alone
@@ -76,6 +76,45 @@ seed is deterministic — which is why part 1 of slice 2 insisted on `setseed()`
 Where bodies legitimately differ (timestamps, ids), the comparison needs a declared normalisation,
 and that normalisation belongs in the scenario file where it can be reviewed — not buried in the
 comparison code where it silently widens over time.
+
+**DONE.** `aftermerge validate --patch <file> --strategy {repair,revert}` exits 0 validated,
+1 rejected, 2 could not run.
+
+On the hand-written revert (`fixtures/regressions/001-n-plus-one/fix.patch`):
+
+```
+passed   patch_regression_test: passes at ed455b5
+skipped  patch_suite: no suite command configured; response equivalence is the oracle
+passed   patch_work_restored: 2.0 vs 2.0 database operations per request
+passed   patch_response_equivalence: identical (17503 bytes, sha256 ea0d29b720d0)
+```
+
+**And proven in the direction that matters.** `cheat.patch` stops the per-order query by returning
+every order with an empty `items` list. Database work becomes *constant -- better than baseline* --
+so the certified regression test passes and two of three substantive checks go green:
+
+```
+passed   patch_regression_test: passes at 7638e5f
+passed   patch_work_restored: 2.0 vs 1.0 database operations per request
+failed   patch_response_equivalence: body length 17503 became 6320 (-11183 bytes)
+```
+
+Exit 1. Without the equivalence oracle that patch would have been certified and shipped.
+
+**Byte-identical responses were verified before the design was committed to.** Two independent
+sandboxes at the same commit return the same 17,503 bytes with the same sha256, because slice 2's
+seed uses `setseed()` and a fixed epoch. Had that not held, equivalence would have needed a
+normalisation for every varying field and the oracle would have been much weaker.
+
+**A skipped check is not a passing check.** shopdemo has no test suite of its own, so `patch_suite`
+records as skipped with the reason stated, is named in the summary, and a result consisting only of
+skips does not validate. Pretending absent evidence is positive evidence is precisely the
+overstatement this project exists to avoid.
+
+**One deviation from the sketch above:** validation is a *single* subprocess boundary, not one per
+check. Four separate commands would each rebuild sandboxes to gather evidence two can supply --
+roughly four extra minutes for no additional truth. Per-check results live in the verification's
+metrics and render in the report either way.
 
 ### Sandboxing an uncommitted tree
 
