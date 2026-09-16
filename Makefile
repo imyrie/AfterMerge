@@ -1,4 +1,4 @@
-.PHONY: up down logs ps probe verify ch reset lint
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
@@ -30,6 +30,20 @@ verify:
 ## Interactive ClickHouse shell
 ch:
 	docker compose exec clickhouse clickhouse-client --database otel
+
+## Slice 0 phase C
+truncate:
+	docker compose exec -T clickhouse clickhouse-client --database otel --query "TRUNCATE TABLE otel_traces"
+
+load:
+	docker compose run --rm loadgen
+
+## make dance GOOD=<ref> BAD=<ref> [DUR=90s] [RPS=20]
+dance:
+	./scripts/deploy_dance.sh $(or $(GOOD),cbb4790) $(or $(BAD),8b4fd77) $(or $(DUR),90s) $(or $(RPS),20)
+
+facts:
+	uv run aftermerge facts
 
 lint:
 	uv run ruff check .

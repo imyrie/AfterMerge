@@ -116,6 +116,10 @@ k6 script against `GET /orders`, ~20 rps, short ramp then steady state.
 
 **Exit:** sustained traffic, spans accumulating in ClickHouse.
 
+**DONE.** k6 via `grafana/k6` (no local install). `constant-arrival-rate`, not `constant-VUs`:
+a VU-based model sends *fewer* requests as responses slow, hiding the regression in the very
+metric being measured. Dropped iterations rose 8 -> 127, itself a signal.
+
 ---
 
 ### C2. The deploy dance
@@ -124,6 +128,15 @@ Run traffic at `good_sha`. Stop. Rebuild with `GIT_SHA=bad_sha`. Run traffic aga
 **Exit:** `SELECT DISTINCT ResourceAttributes['service.version'] FROM otel_traces` returns **two** values.
 
 **Gotcha:** the `GIT_SHA` env var must actually change between runs. Forget it and both windows carry the same version, your `GROUP BY` collapses to one row, and nothing about the demo works. Check this before running traffic, not after.
+
+**Gotcha, hit for real:** `docker compose run --rm loadgen` runs with `GIT_SHA` unset, so
+`image: shopdemo:${GIT_SHA:-dev}` resolves to `shopdemo:dev`. Compose decides the running
+containers no longer match the config and **recreates them from the dev image** -- silently
+reverting the deploy and tagging every span `dev`. The first full run produced one version and
+2.0 spans/request for both sides before this was spotted. Fix: `run --rm --no-deps`, export
+`GIT_SHA`, and re-assert the served version *after* the load, not only before it.
+
+**DONE.** Both services confirmed serving the expected SHA before and after each load run.
 
 No `deployments` table yet — in slice 0 the `service.version` attribute *is* the deploy record.
 
@@ -144,10 +157,16 @@ ORDER BY version
 
 **Exit — and the exit condition for all of slice 0:**
 
+**DONE 2026-09-16.** 20 rps, 90s per side:
+
 ```
-a1b2c3d     1.0    ~300
-e4f5g6h    50.0   ~4000
+version   spans_per_request   p50_ms   p95_ms   p99_ms
+cbb4790          2.0           12.3     156.4     770.0
+8b4fd77         51.0           40.1    1753.1    7516.3
 ```
+
+25.5x more database spans per request; p95 up 11.2x. Every span attributed to
+`orders/repository.py`. No LLM involved -- two SQL files and a GROUP BY.
 
 ---
 

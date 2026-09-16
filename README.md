@@ -12,7 +12,7 @@ for the current build checklist.
 |---|---|---|
 | 0 / Phase A | Storage + telemetry pipe | **done** — verified 2026-09-16 |
 | 0 / Phase B | Demo app, instrumentation, regression commit | **done** — verified 2026-09-16 |
-| 0 / Phase C | Load, deploy dance, the query | not started |
+| 0 / Phase C | Load, deploy dance, the query | **done** — verified 2026-09-16 |
 
 ## Quickstart (Phase A)
 

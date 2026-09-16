@@ -102,6 +102,21 @@ services:
     depends_on:
       - orders
 
+  # Run on demand: `docker compose run --rm loadgen`
+  loadgen:
+    image: grafana/k6:latest
+    container_name: aftermerge-loadgen
+    profiles: ["load"]
+    volumes:
+      - ./fixtures/shopdemo/loadgen:/scripts:ro
+    environment:
+      TARGET: http://gateway:8000
+      RPS: ${RPS:-20}
+      DURATION: ${DURATION:-60s}
+    command: ["run", "/scripts/browse.js"]
+    depends_on:
+      - gateway
+
 volumes:
   clickhouse-data:
   postgres-data:

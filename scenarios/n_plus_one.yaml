@@ -1,0 +1,43 @@
+# Slice 0's known-answer fixture.
+#
+# The `expect` block is what turns the demo into a test: tests/e2e asserts these
+# values, so AfterMerge is checked against a regression whose true cause is known
+# rather than merely producing plausible-looking output.
+
+id: n_plus_one
+title: N+1 query introduced in order listing
+
+service: orders
+route_service: gateway
+route: "GET /orders"
+
+commits:
+  good_sha: cbb4790
+  bad_sha: 8b4fd77
+  branch: regression/001-n-plus-one
+  patch: fixtures/regressions/001-n-plus-one/patch.diff
+
+slo:
+  p95_ms: 500
+  error_rate: 0.01
+
+traffic:
+  script: fixtures/shopdemo/loadgen/browse.js
+  rps: 20
+  duration: 90s
+
+expect:
+  detected: true
+  root_cause_file: fixtures/shopdemo/orders/repository.py
+  code_site: orders/repository.py
+  facts_present:
+    - span_count_per_trace
+    - latency_quantiles
+  db_spans_per_request:
+    good: 2
+    bad: 51
+  # Measured 2026-09-16 at 20 rps for 90s per side.
+  p95_ms:
+    good: 156.4
+    bad: 1753.1
+  latency_ratio_min: 5.0
