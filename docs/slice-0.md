@@ -18,8 +18,13 @@
 
 **Exit:** `docker compose up` is clean; ClickHouse answers `SELECT 1`; collector logs show no export errors.
 
+**DONE 2026-09-16.** ClickHouse 25.3, Postgres 17, collector 0.137.0 all healthy.
+
 **Gotchas:**
 - Must be the **contrib** collector image. The core image has no ClickHouse exporter and fails with an unhelpful config error.
+- **Do not use `clickhouse-server:25.8`.** Its arm64 build ships a 0-byte `/entrypoint.sh` and the
+  container dies with `exec format error` while the 344 MB `clickhouse` binary sits there intact.
+  25.3 LTS, 24.8 and `latest` are all fine. Verify any version bump actually starts.
 - `otel_traces` does not exist yet. The exporter creates it on first write (`create_schema: true` by default). An empty database here is correct.
 
 ---
@@ -32,6 +37,10 @@ A ~15-line script: create one span, export OTLP to `localhost:4317`, exit. Then 
 **Why this is its own step:** it isolates plumbing from application code completely. Skip it and the first time spans fail to arrive you will be debugging four services at once instead of one config file.
 
 **Gotcha:** `BatchSpanProcessor` does not flush on exit. Call `provider.force_flush()` or you will see an empty table and blame the collector.
+
+**DONE 2026-09-16.** Parent + child span round-tripped; parent/child linkage intact;
+`service.version`, `deployment.environment` and `code.file.path` all queryable from ClickHouse.
+The exporter created `otel_traces` plus the `otel_traces_trace_id_ts` index materialized view.
 
 ---
 

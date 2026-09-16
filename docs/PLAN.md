@@ -238,12 +238,14 @@ These are the highest-leverage technical decisions. Both convert "the LLM guesse
 Set the OTel resource attributes at service startup:
 
 ```python
-Resource.create({
-    "service.name": "orders",
-    "service.version": os.environ["GIT_SHA"],
-    "deployment.environment": "demo",
-    "aftermerge.deployment.id": os.environ["DEPLOY_ID"],
-})
+Resource.create(
+    {
+        "service.name": "orders",
+        "service.version": os.environ["GIT_SHA"],
+        "deployment.environment": "demo",
+        "aftermerge.deployment.id": os.environ["DEPLOY_ID"],
+    }
+)
 ```
 
 Now "did behaviour change after the deploy?" is a `GROUP BY ResourceAttributes['service.version']`.

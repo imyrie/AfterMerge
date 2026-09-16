@@ -1,0 +1,72 @@
+# AfterMerge local stack.
+#
+# Phase A brings up storage and the telemetry pipe only -- nothing emits spans yet.
+# The demo application (fixtures/shopdemo) joins this file in Phase B.
+
+name: aftermerge
+
+services:
+  clickhouse:
+    # Pinned to 25.3 LTS: the 25.8 arm64 build ships a 0-byte /entrypoint.sh
+    # and dies with "exec format error". Verify any bump actually starts.
+    image: clickhouse/clickhouse-server:25.3
+    container_name: aftermerge-clickhouse
+    ports:
+      - "8123:8123"   # HTTP  -- clickhouse-connect, curl
+      - "9000:9000"   # native -- the collector's exporter
+    environment:
+      CLICKHOUSE_DB: otel
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./infra/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: aftermerge-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: aftermerge
+      POSTGRES_PASSWORD: aftermerge
+      POSTGRES_DB: shopdemo
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aftermerge -d shopdemo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.137.0
+    container_name: aftermerge-otel-collector
+    command: ["--config=/etc/otel/config.yaml"]
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+      - "13133:13133"  # health_check extension
+    volumes:
+      - ./infra/otel-collector.yaml:/etc/otel/config.yaml:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  clickhouse-data:
+  postgres-data:

@@ -1,0 +1,36 @@
+.PHONY: up down logs ps probe verify ch reset lint
+
+## Bring up storage + telemetry pipe (Phase A)
+up:
+	docker compose up -d
+	@echo "waiting for clickhouse..."
+	@until [ "$$(docker inspect -f '{{.State.Health.Status}}' aftermerge-clickhouse 2>/dev/null)" = "healthy" ]; do sleep 2; done
+	@echo "stack ready -- clickhouse :8123/:9000  otlp :4317/:4318  postgres :5432"
+
+down:
+	docker compose down
+
+## Wipe volumes too. Destroys all collected telemetry.
+reset:
+	docker compose down -v
+
+ps:
+	docker compose ps
+
+logs:
+	docker compose logs -f otel-collector
+
+## Phase A2: emit a probe span, then confirm it reached ClickHouse
+probe:
+	uv run python scripts/emit_test_span.py
+
+verify:
+	uv run python scripts/verify_span.py
+
+## Interactive ClickHouse shell
+ch:
+	docker compose exec clickhouse clickhouse-client --database otel
+
+lint:
+	uv run ruff check .
+	uv run ruff format --check .
