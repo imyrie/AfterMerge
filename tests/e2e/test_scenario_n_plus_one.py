@@ -32,14 +32,38 @@ def _stack_ready() -> bool:
         with engine.connect():
             pass
         engine.dispose()
-        rows = client.get_client().query("SELECT count() FROM otel_traces").result_rows
-        return bool(rows) and rows[0][0] > 0
+        # Both versions must have recent route traffic. A bare count includes
+        # spans hours old, which the detector's lookback window excludes -- the
+        # suite would then fail for an environmental reason rather than a bug.
+        commits = SCENARIO["commits"]
+        rows = (
+            client.get_client()
+            .query(
+                """
+            SELECT uniqExact(ResourceAttributes['service.version'])
+            FROM otel_traces
+            WHERE ServiceName = {svc:String} AND SpanKind = 'Server'
+              AND SpanName = {route:String}
+              AND ResourceAttributes['service.version'] IN ({good:String}, {bad:String})
+              AND Timestamp >= now() - INTERVAL 200 MINUTE
+            """,
+                parameters={
+                    "svc": SCENARIO["route_service"],
+                    "route": SCENARIO["route"],
+                    "good": commits["good_sha"],
+                    "bad": commits["bad_sha"],
+                },
+            )
+            .result_rows
+        )
+        return bool(rows) and rows[0][0] == 2
     except Exception:
         return False
 
 
 pytestmark = pytest.mark.skipif(
-    not _stack_ready(), reason="stack not running or no telemetry; run `make up && make dance`"
+    not _stack_ready(),
+    reason="no recent telemetry for both scenario commits; run `make truncate && make dance`",
 )
 
 

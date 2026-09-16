@@ -31,6 +31,9 @@ from aftermerge.store.repositories import (
     IncidentRepository,
 )
 from aftermerge.telemetry import catalog, client
+from aftermerge.testgen import context as testgen_context
+from aftermerge.testgen.generator import TemplateGenerator
+from aftermerge.testgen.writer import write as write_candidate
 
 app = typer.Typer(
     help="AfterMerge: closed-loop production regression pipeline.",
@@ -476,6 +479,57 @@ def verify(
     )
     if summary:
         console.print(summary)
+
+
+@app.command()
+def testgen() -> None:
+    """Write a regression test encoding the incident's measured behaviour.
+
+    Deterministic by default: the template generator needs no credentials, and
+    a generated test is trustworthy because it passes the fail@bad / pass@good
+    gate, not because of what wrote it.
+    """
+    engine = _prepared_engine()
+    repo_root = Path.cwd()
+
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        found = IncidentRepository(session).list_recent(limit=1)
+        if not found:
+            console.print("[yellow]no incidents; run `aftermerge detect` first[/yellow]")
+            raise typer.Exit(code=2)
+        incident = found[0]
+
+        replayable = CapturedRequestRepository(session).replayable_for_incident(incident.id)
+        if not replayable:
+            console.print(
+                "[yellow]no replayable captured requests; run `aftermerge capture`[/yellow]"
+            )
+            raise typer.Exit(code=2)
+
+        facts = FactRepository(session).for_incident(incident.id)
+        investigation = investigator_service.investigate(
+            session, incident, repo_root=repo_root, source_prefix=DEFAULT_SOURCE_PREFIX
+        )
+        ctx = testgen_context.build(incident, facts, replayable[0], investigation.correlation)
+
+    if not ctx.discriminates:
+        console.print(
+            "[yellow]the evidence cannot support a discriminating test:[/yellow] "
+            f"baseline {ctx.baseline_spans_per_request:.1f} vs candidate "
+            f"{ctx.candidate_spans_per_request:.1f} operations per request"
+        )
+        raise typer.Exit(code=2)
+
+    candidate = TemplateGenerator().generate(ctx)
+    path = write_candidate(candidate, repo_root=repo_root)
+
+    rel = path.relative_to(repo_root)
+    console.print(f"wrote {rel}  [dim](by {candidate.generated_by})[/dim]")
+    console.print(f"rationale: {candidate.rationale}\n")
+    console.print("[dim]Not yet validated. Gate it with:[/dim]")
+    run = f"uv run pytest -m slow {rel}"
+    console.print(f"  AFTERMERGE_TEST_REF={ctx.candidate_version} {run}   # must FAIL")
+    console.print(f"  AFTERMERGE_TEST_REF={ctx.baseline_version} {run}   # must PASS")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@
 differential replay, and generate a regression test that provably fails on the bad commit and passes
 on the good one.
 
-**Status:** parts 1-3 done (2026-09-16). Parts 4-5 are still a plan.
+**Status:** parts 1-4 done (2026-09-16). Part 5 is still a plan.
 
 **Why this slice is the differentiator.** Slice 1 produces a persuasive report, but every claim in it
 is still level 1 or 2 — measured or inferred. Plenty of tools stop there. What almost nothing does is
@@ -182,6 +182,50 @@ An LLM writes a pytest regression test from the incident's facts and the diff.
 |---|---|
 | Input | level-1 facts + the diff hunk, as structured output |
 | Output | a test file under `tests/regression/` |
+
+**DONE.** `aftermerge testgen` writes `tests/regression/test_<service>_<route>_regression.py`.
+
+**Two generators behind one protocol, and the template is the default.** `TemplateGenerator` is
+deterministic and needs no credentials; `AnthropicGenerator` takes an injected client, so the code
+path is testable without a key or network access.
+
+That ordering is deliberate. The *gate* is what makes a generated test trustworthy, not the thing
+that wrote it: a test is worth having once it has been shown to fail on the bad commit and pass on
+the good one, and a template that clears that bar is worth exactly as much as a model that clears
+it -- while also running in CI for free. The model is for cases a template cannot express.
+
+**The generated assertion is scaling-invariance, not a threshold.** When the captured request has a
+size-like parameter (`limit`, `page_size`, `per_page`, ...), the test replays at two page sizes and
+asserts the work does not grow:
+
+```python
+assert large.db_spans_per_request <= small.db_spans_per_request + 1
+```
+
+That encodes the N+1 property itself rather than a chosen number. Without such a parameter it falls
+back to a threshold derived from the baseline. `TestContext.discriminates` rejects evidence that
+could not separate the two builds *before* anything is written, saving two sandbox builds.
+
+**Verified manually** (automating it is part 5):
+
+```
+AFTERMERGE_TEST_REF=8b4fd77 -> FAILED: 6.0 operations at limit=5 but 51.0 at limit=50
+AFTERMERGE_TEST_REF=cbb4790 -> 1 passed
+```
+
+**A contamination bug the generated test exposed.** `replay()` measured spans divided by traces
+across the sandbox's whole trace database, so a second replay against the same sandbox was polluted
+by the first: five requests at 6 operations followed by five at 51 read as **28.5**, not 51. A
+scaling assertion replays twice by construction, so it hit this immediately. The test still failed
+at the bad commit, but only by luck of magnitude. `Sandbox.reset_traces()` now empties the table
+before each replay, which is preferable to narrowing the query by timestamp because it keeps replay
+running the *same* named SQL as production.
+
+**A pytest hook that silenced the whole suite.** `pytest_collection_modifyitems` in
+`tests/regression/conftest.py` is a *session* hook: it receives every collected item regardless of
+which conftest defines it. An unguarded loop marking items slow marked the entire suite slow, and
+`make test` reported "111 deselected" -- running nothing while looking green. It is now scoped to
+its own directory explicitly.
 
 **The generated test must assert on work, not time.** A latency-based assertion would be flaky, and —
 per slice 1 — would have failed to catch this very regression against a warm database, where p95 rose

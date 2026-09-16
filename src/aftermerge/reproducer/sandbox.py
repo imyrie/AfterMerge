@@ -106,6 +106,31 @@ class Sandbox:
         raw = result.stdout.strip()
         return int(raw) if raw.isdigit() else 0
 
+    def reset_traces(self) -> None:
+        """Empty this sandbox's trace table.
+
+        Replay measures per-request work by dividing spans by traces across the
+        whole database, so a second replay against the same sandbox is polluted
+        by the first: five requests at 6 operations followed by five at 51 reads
+        as 28.5, not 51. Any test that replays twice -- which is exactly what a
+        scaling assertion does -- would measure a blend of both.
+
+        Truncating is preferable to narrowing the query by timestamp, because it
+        keeps replay running the *same* named SQL as production.
+        """
+        subprocess.run(
+            [
+                "docker",
+                "exec",
+                "aftermerge-clickhouse",
+                "clickhouse-client",
+                "--query",
+                f"TRUNCATE TABLE IF EXISTS {self.trace_database}.otel_traces",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
     def wait_for_traces(self, expected: int, *, timeout: float = 120.0) -> int:
         """Block until `expected` additional root traces are visible.
 

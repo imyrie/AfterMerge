@@ -48,9 +48,9 @@ def replay(
             "capture flagged it, and replay does not second-guess that"
         )
 
-    # Health polling during startup also creates root traces, so measure the
-    # delta rather than an absolute count.
-    traces_before = sandbox.trace_count()
+    # Start from an empty trace table so this measurement covers only the
+    # requests sent below -- see Sandbox.reset_traces.
+    sandbox.reset_traces()
 
     failures = 0
     with httpx.Client(base_url=sandbox.base_url, timeout=timeout) as http:
@@ -72,7 +72,7 @@ def replay(
     # quiet. Measuring while spans are still arriving understates the per-request
     # count, and does so silently.
     delivered = repeat - failures
-    sandbox.wait_for_traces(traces_before + delivered)
+    sandbox.wait_for_traces(delivered)
     sandbox.wait_until_quiet(minimum=delivered)
 
     # The same named query production uses, pointed at this sandbox's own

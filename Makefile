@@ -1,4 +1,4 @@
-.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
@@ -45,6 +45,10 @@ dance:
 
 facts:
 	uv run aftermerge facts
+
+## Write a regression test from the incident's evidence
+testgen:
+	uv run aftermerge testgen
 
 ## Detect a regression and write an evidence-backed report
 investigate:

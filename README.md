@@ -21,7 +21,8 @@ for the current build checklist.
 | 2 / Sandbox | Ephemeral app at any commit, isolated telemetry | **done** |
 | 2 / Capture | Sanitised production request envelopes | **done** |
 | 2 / Replay | Differential replay → first level-3 verification | **done** |
-| 2 / Testgen | Generated test gated on fail@bad / pass@good | not started |
+| 2 / Testgen | Regression test written from incident evidence | **done** |
+| 2 / Gate | Automated fail@bad / pass@good validation | not started |
 
 ## Quickstart
 
@@ -65,6 +66,7 @@ cbb4790          2.0           12.3     156.4     770.0
 | `uv run aftermerge capture` | reconstruct replayable requests from the regressed version |
 | `uv run aftermerge replay` | differential replay across two commits (exit 0 = reproduced) |
 | `uv run aftermerge verify` | run the replay and record its outcome as level-3 evidence |
+| `uv run aftermerge testgen` | write a regression test encoding the measured behaviour |
 | `make investigate` | detect, correlate with the diff, write `incident-report.md` |
 | `make test` / `make test-all` | fast suite / including the slow docker sandbox tests |
 | `make lint` | ruff check + format check |

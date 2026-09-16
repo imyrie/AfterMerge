@@ -35,20 +35,26 @@ class DetectionOutcome:
 def _split_samples(
     result: client.FactResult, baseline: str, candidate: str
 ) -> tuple[list[float], list[float]]:
+    """Separate duration samples by version.
+
+    An empty result has no columns at all, so indexing into them raises
+    `ValueError: 'version' is not in list` -- which reads like a schema bug when
+    the truth is simply that no telemetry fell inside the lookback window.
+    Returning empty samples lets the comparison report `insufficient_data`,
+    which is the honest answer.
+    """
+    if not {"version", "duration_ms"} <= set(result.columns):
+        return [], []
+
     version_idx = result.columns.index("version")
     duration_idx = result.columns.index("duration_ms")
     base: list[float] = []
     cand: list[float] = []
     for row in result.rows:
-        bucket = (
-            base
-            if row[version_idx] == baseline
-            else cand
-            if row[version_idx] == candidate
-            else None
-        )
-        if bucket is not None:
-            bucket.append(float(row[duration_idx]))
+        if row[version_idx] == baseline:
+            base.append(float(row[duration_idx]))
+        elif row[version_idx] == candidate:
+            cand.append(float(row[duration_idx]))
     return base, cand
 
 
