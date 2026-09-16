@@ -132,3 +132,23 @@ def test_teardown_leaves_nothing_behind() -> None:
         text=True,
     )
     assert exists.stdout.strip() == "0"
+
+
+def test_the_regression_reproduces_differentially() -> None:
+    """The level-3 claim: the diff causes it, shown with a control.
+
+    Correlation is an inference from production telemetry. This is an experiment.
+    """
+    from aftermerge.reproducer.differential import run_differential
+
+    outcome = run_differential(
+        RequestEnvelope.get("/orders", limit=50),
+        good_ref="cbb4790",
+        bad_ref=BAD_SHA,
+        repo_root=ROOT,
+        repeat=10,
+    )
+
+    assert outcome.good.db_spans_per_request == pytest.approx(2.0, rel=0.05)
+    assert outcome.bad.db_spans_per_request == pytest.approx(51.0, rel=0.05)
+    assert outcome.reproduced

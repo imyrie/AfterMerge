@@ -24,11 +24,17 @@ class FactResult:
         return bool(self.rows)
 
 
-def get_client() -> Any:
+def get_client(database: str | None = None) -> Any:
+    """A ClickHouse client, optionally pointed at a sandbox's trace database.
+
+    The `database` argument is what lets replay run the *same* named SQL as
+    production. If replay used different queries, a difference between the two
+    would prove nothing about the code.
+    """
     return clickhouse_connect.get_client(
         host=os.environ.get("CLICKHOUSE_HOST", "localhost"),
         port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
-        database=os.environ.get("CLICKHOUSE_DATABASE", "otel"),
+        database=database or os.environ.get("CLICKHOUSE_DATABASE", "otel"),
     )
 
 

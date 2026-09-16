@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -15,6 +16,13 @@ from aftermerge.investigator import service as investigator_service
 from aftermerge.investigator.code_map import DEFAULT_SOURCE_PREFIX
 from aftermerge.report import render as report_render
 from aftermerge.reproducer import capture as capture_mod
+from aftermerge.reproducer.differential import (
+    DEFAULT_REPEAT,
+    DEFAULT_THRESHOLD,
+    run_differential,
+)
+from aftermerge.reproducer.envelope import RequestEnvelope
+from aftermerge.reproducer.verify import verify_differential
 from aftermerge.store import db as store_db
 from aftermerge.store.repositories import (
     CapturedRequestRepository,
@@ -144,10 +152,6 @@ def facts(
     _render(spans, f"db spans per request — {service}")
     console.print()
     _render(latency, f"latency — {route_service} {route}")
-
-
-if __name__ == "__main__":
-    app()
 
 
 @app.command()
@@ -355,3 +359,124 @@ def capture(
     for row in rows:
         if row[5]:
             console.print(f"\n[yellow]{row[0]} {row[1]} not replayable:[/yellow] {row[5]}")
+
+
+@app.command()
+def replay(
+    good: str | None = typer.Option(None, help="Baseline ref. Defaults to the incident's."),
+    bad: str | None = typer.Option(None, help="Candidate ref. Defaults to the incident's."),
+    repeat: int = typer.Option(DEFAULT_REPEAT, help="Requests to send against each side."),
+    threshold: float = typer.Option(
+        DEFAULT_THRESHOLD, help="Amplification ratio to call it reproduced."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
+) -> None:
+    """Replay a captured request against two commits in isolation.
+
+    Exits 0 when the regression reproduces and 1 when it does not. That exit
+    code is the evidence: `aftermerge verify` records it rather than deciding
+    for itself whether the replay succeeded.
+    """
+    engine = _prepared_engine()
+    repo_root = Path.cwd()
+
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        found = IncidentRepository(session).list_recent(limit=1)
+        if not found:
+            console.print("[yellow]no incidents; run `aftermerge detect` first[/yellow]")
+            raise typer.Exit(code=2)
+        incident = found[0]
+        good_ref = good or incident.baseline_version
+        bad_ref = bad or incident.candidate_version
+
+        replayable = CapturedRequestRepository(session).replayable_for_incident(incident.id)
+        if not replayable:
+            console.print(
+                "[yellow]no replayable captured requests; run `aftermerge capture`[/yellow]"
+            )
+            raise typer.Exit(code=2)
+        captured = replayable[0]
+        envelope = RequestEnvelope(
+            method=captured.method,
+            path=captured.path,
+            query=dict(captured.query),
+            headers=dict(captured.headers),
+            replay_safe=True,
+            source_trace_id=captured.source_trace_id,
+        )
+
+    result = run_differential(
+        envelope,
+        good_ref=good_ref,
+        bad_ref=bad_ref,
+        repo_root=repo_root,
+        repeat=repeat,
+        threshold=threshold,
+    )
+
+    if as_json:
+        console.print_json(json.dumps(result.as_dict()))
+    else:
+        table = Table(
+            title=f"differential replay \u2014 {result.target}",
+            title_justify="left",
+            header_style="bold",
+        )
+        for column in ("", good_ref, bad_ref):
+            table.add_column(column)
+        table.add_row(
+            "db spans/request",
+            f"{result.good.db_spans_per_request:.1f}",
+            f"{result.bad.db_spans_per_request:.1f}",
+        )
+        table.add_row(
+            "requests sent", str(result.good.requests_sent), str(result.bad.requests_sent)
+        )
+        table.add_row("failures", str(result.good.failures), str(result.bad.failures))
+        table.add_row("code site", result.good.code_site or "-", result.bad.code_site or "-")
+        console.print(table)
+        colour = "red" if result.reproduced else "green"
+        console.print(f"\n[{colour}]{result.summary}[/{colour}]")
+
+    raise typer.Exit(code=0 if result.reproduced else 1)
+
+
+@app.command()
+def verify(
+    repeat: int = typer.Option(DEFAULT_REPEAT, help="Requests to send against each side."),
+) -> None:
+    """Reproduce the incident in isolation and record the outcome as evidence.
+
+    Runs the replay as a subprocess and stores its exit code. The verdict comes
+    from what the process did, not from what this command believes.
+    """
+    engine = _prepared_engine()
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        found = IncidentRepository(session).list_recent(limit=1)
+        if not found:
+            console.print("[yellow]no incidents; run `aftermerge detect` first[/yellow]")
+            raise typer.Exit(code=2)
+
+        console.print("running differential replay (two sandboxes, this takes a minute)...")
+        try:
+            verification = verify_differential(
+                session, found[0], repo_root=Path.cwd(), repeat=repeat
+            )
+        except ValueError as exc:
+            console.print(f"[yellow]{exc}[/yellow]")
+            raise typer.Exit(code=2) from exc
+
+        verdict = verification.verdict
+        exit_code = verification.exit_code
+        summary = str(verification.metrics.get("summary", ""))
+
+    colour = "red" if verdict == "confirmed" else "yellow"
+    console.print(
+        f"\n[{colour}]{verification.method}: {verdict}[/{colour}] (exit code {exit_code})"
+    )
+    if summary:
+        console.print(summary)
+
+
+if __name__ == "__main__":
+    app()

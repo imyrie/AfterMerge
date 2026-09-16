@@ -118,10 +118,21 @@ def render(investigation: Investigation) -> str:
     out.append("")
     verifications = [v for h in investigation.hypotheses for v in h.verifications]
     if verifications:
-        out.append("| method | verdict | exit code |")
-        out.append("|---|---|---|")
         for v in verifications:
-            out.append(f"| {v.method} | **{v.verdict}** | {v.exit_code} |")
+            out.append(f"**{v.method}: {v.verdict}** (exit code {v.exit_code})")
+            out.append("")
+            summary = str(v.metrics.get("summary") or "")
+            if summary:
+                out.append(summary)
+                out.append("")
+            # The command is part of the evidence: a conclusion nobody else can
+            # re-run is a claim, not a verification.
+            out.append("Reproduce with:")
+            out.append("")
+            out.append("```bash")
+            out.append(v.command)
+            out.append("```")
+            out.append("")
     else:
         out.append(
             "**None.** Nothing above has been reproduced or verified by execution. "

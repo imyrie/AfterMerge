@@ -228,6 +228,10 @@ class Verification(Base):
     `exit_code` is NOT NULL, and the repository accepts only a
     `subprocess.CompletedProcess`. There is deliberately no code path that lets a
     language model claim something was verified: it cannot produce that object.
+
+    Three verdicts, not two. A run that crashed or could not start is `errored`,
+    never `refuted`: recording a broken harness as evidence against a hypothesis
+    would be worse than recording nothing.
     """
 
     __tablename__ = "verifications"
@@ -246,7 +250,9 @@ class Verification(Base):
     hypothesis: Mapped[Hypothesis] = relationship(back_populates="verifications")
 
     __table_args__ = (
-        CheckConstraint("verdict IN ('confirmed','refuted')", name="ck_verifications_verdict"),
+        CheckConstraint(
+            "verdict IN ('confirmed','refuted','errored')", name="ck_verifications_verdict"
+        ),
     )
 
     def __repr__(self) -> str:

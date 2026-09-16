@@ -239,12 +239,18 @@ class VerificationRepository:
         process: subprocess.CompletedProcess[str],
         metrics: dict[str, Any] | None = None,
         stdout_limit: int = 4000,
+        inconclusive_codes: frozenset[int] = frozenset(),
     ) -> Verification:
         """Persist the outcome of a real execution.
 
         The `process` argument is the enforcement mechanism. Verdict is derived
         from the exit code, not supplied by the caller, so nothing can record a
         confirmation for a command that failed.
+
+        `inconclusive_codes` lets a caller declare which codes its command uses
+        for "could not run" -- exit 2 for a missing prerequisite, say. Those
+        become `errored` rather than `refuted`. The caller states its convention;
+        it still cannot state the outcome.
         """
         command = (
             process.args
@@ -259,7 +265,13 @@ class VerificationRepository:
             exit_code=process.returncode,
             stdout_excerpt=(process.stdout or "")[:stdout_limit] or None,
             metrics=metrics or {},
-            verdict="confirmed" if process.returncode == 0 else "refuted",
+            verdict=(
+                "confirmed"
+                if process.returncode == 0
+                else "errored"
+                if process.returncode in inconclusive_codes
+                else "refuted"
+            ),
             ran_at=datetime.now(UTC),
         )
         self._session.add(verification)

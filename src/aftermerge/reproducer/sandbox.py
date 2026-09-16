@@ -88,6 +88,79 @@ class Sandbox:
             f"(expected at least {minimum})"
         )
 
+    def trace_count(self) -> int:
+        """Distinct root traces currently visible -- one per inbound request."""
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "aftermerge-clickhouse",
+                "clickhouse-client",
+                "--query",
+                f"SELECT uniqExact(TraceId) FROM {self.trace_database}.otel_traces "
+                "WHERE ParentSpanId = ''",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        raw = result.stdout.strip()
+        return int(raw) if raw.isdigit() else 0
+
+    def wait_for_traces(self, expected: int, *, timeout: float = 120.0) -> int:
+        """Block until `expected` additional root traces are visible.
+
+        Stronger than waiting for the span count to settle. The collector
+        batches on a one-second timer, so between bursts the total plateaus and
+        a stability check declares victory while a third of the requests are
+        still in flight -- which is how a measurement of 51 spans per request
+        came back as 47.6 (476 spans over 10 traces instead of 765 over 15).
+
+        The request count is known exactly, so waiting for it is not a guess.
+        """
+        deadline = time.monotonic() + timeout
+        seen = 0
+        while time.monotonic() < deadline:
+            seen = self.trace_count()
+            if seen >= expected:
+                return seen
+            time.sleep(1)
+        raise SandboxError(
+            f"only {seen} of {expected} expected traces reached {self.trace_database} "
+            f"within {timeout:.0f}s"
+        )
+
+    def wait_until_quiet(
+        self, minimum: int = 1, *, settle_polls: int = 3, timeout: float = 90.0
+    ) -> int:
+        """Block until the span count stops rising.
+
+        `wait_for_spans` is not enough before *measuring*. Fifteen requests
+        against the N+1 build produce ~765 spans, so a threshold of fifteen
+        returns while most are still in flight -- and a per-request average
+        computed then reads 47.6 instead of 51.0. Anything asserting on that
+        number would be quietly flaky.
+
+        Waiting for the count to stop changing needs no advance knowledge of how
+        many spans a request should produce, which is exactly what is unknown
+        when the point of the exercise is to find out.
+        """
+        seen = self.wait_for_spans(minimum=minimum, timeout=timeout)
+        deadline = time.monotonic() + timeout
+        unchanged = 0
+
+        while time.monotonic() < deadline:
+            time.sleep(1)
+            current = self.span_count()
+            unchanged = unchanged + 1 if current == seen else 0
+            seen = current
+            if unchanged >= settle_polls:
+                return seen
+
+        raise SandboxError(
+            f"span count in {self.trace_database} never settled within {timeout:.0f}s "
+            f"(last saw {seen})"
+        )
+
 
 def _compose(project: str, *args: str, env: dict[str, str] | None = None) -> str:
     result = subprocess.run(

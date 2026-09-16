@@ -4,7 +4,7 @@
 differential replay, and generate a regression test that provably fails on the bad commit and passes
 on the good one.
 
-**Status:** parts 1 and 2 done (2026-09-16). Parts 3-5 are still a plan.
+**Status:** parts 1-3 done (2026-09-16). Parts 4-5 are still a plan.
 
 **Why this slice is the differentiator.** Slice 1 produces a persuasive report, but every claim in it
 is still level 1 or 2 — measured or inferred. Plenty of tools stop there. What almost nothing does is
@@ -124,6 +124,42 @@ trivial *for this demo*. Build it properly anyway, because the design is the poi
 | Does | replay the same captured request against sandbox@good and sandbox@bad, N times each |
 | Then | runs **the same named fact queries** from `telemetry/queries/` against both |
 | Exit | a `verifications` row with a real exit code — **the first level-3 evidence in the project** |
+
+**DONE.** `aftermerge verify` produces:
+
+```
+differential_replay: confirmed (exit code 0)
+Replaying /orders?limit=50 against cbb4790 and 8b4fd77 in isolation produced
+2.0 vs 51.0 database operations per request (25.5x).
+```
+
+**The verification genuinely runs as a subprocess.** `VerificationRepository` requires a
+`CompletedProcess`, and satisfying that by fabricating one in-process would hollow out the whole
+invariant. So `aftermerge replay` is a real command with exit-code semantics — 0 reproduced,
+1 not reproduced, 2 could not run — and `verify` records what that process actually did. The stored
+evidence is an exit code and stdout anyone can reproduce by re-running the printed command.
+
+**Three verdicts, not two.** Exit 2 records as `errored`, never `refuted`. A harness that could not
+start is not evidence against a hypothesis, and letting broken tooling silently discredit a correct
+conclusion would be worse than recording nothing. Callers declare which codes mean "could not run";
+they still cannot declare the outcome.
+
+**Two measurement bugs, both of which would have produced quietly wrong numbers:**
+
+1. `wait_for_spans(minimum=repeat)` returned as soon as 15 spans existed, but 15 requests against the
+   N+1 build produce ~765 spans. Measuring then gave **47.6** operations per request instead of 51.0.
+2. Waiting for the span count to *stabilise* was not enough either: the collector batches on a
+   one-second timer, so the total plateaus between bursts and a stability check declares victory with
+   a third of the requests still in flight — 476 spans over 10 traces rather than 765 over 15.
+
+The fix is that the request count is **known exactly**, so `wait_for_traces(expected)` waits for it
+rather than inferring from stability. Part 4's generated test will assert on this number; a flaky
+count here would have poisoned it.
+
+**A `python -m` bug worth knowing:** commands appended after the `if __name__ == "__main__"` block
+are registered too late, so `python -m aftermerge.cli replay` reported "No such command" while
+`uv run aftermerge replay` worked fine — the console script imports the module fully first. Only the
+subprocess path exposed it.
 
 Reusing the identical SQL in replay and production is what makes the comparison meaningful. If replay
 used different queries, a difference between them would prove nothing.

@@ -278,3 +278,40 @@ def test_replay_only_ever_sees_replayable_requests(engine, incident_id) -> None:
         replayable = repo.replayable_for_incident(incident_id)
         assert len(replayable) == 1
         assert replayable[0].method == "GET"
+
+
+def test_a_crashed_run_is_errored_not_refuted(engine, incident_id) -> None:
+    """A harness that could not run is not evidence against the hypothesis.
+
+    Recording exit 2 as `refuted` would let broken tooling silently discredit a
+    correct conclusion.
+    """
+    hypothesis_id = _hypothesis(engine, incident_id)
+    process = subprocess.run(["sh", "-c", "exit 2"], capture_output=True, text=True)
+
+    with db.session_scope(engine) as session:
+        verification = VerificationRepository(session).record(
+            hypothesis_id=hypothesis_id,
+            method="differential_replay",
+            process=process,
+            inconclusive_codes=frozenset({2}),
+        )
+
+    assert verification.verdict == "errored"
+    assert verification.exit_code == 2
+
+
+def test_a_genuine_negative_is_still_refuted(engine, incident_id) -> None:
+    """Exit 1 means it ran and disagreed; that is real evidence."""
+    hypothesis_id = _hypothesis(engine, incident_id)
+    process = subprocess.run(["sh", "-c", "exit 1"], capture_output=True, text=True)
+
+    with db.session_scope(engine) as session:
+        verification = VerificationRepository(session).record(
+            hypothesis_id=hypothesis_id,
+            method="differential_replay",
+            process=process,
+            inconclusive_codes=frozenset({2}),
+        )
+
+    assert verification.verdict == "refuted"
