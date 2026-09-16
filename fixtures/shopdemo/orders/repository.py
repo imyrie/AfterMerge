@@ -17,34 +17,34 @@ ORDERS_SQL = """
     LIMIT $1
 """
 
-ITEMS_BATCH_SQL = """
+ITEMS_FOR_ORDER_SQL = """
     SELECT order_id, sku, quantity, unit_price_cents
     FROM order_items
-    WHERE order_id = ANY($1::bigint[])
+    WHERE order_id = $1
 """
 
 
 async def list_orders(pool: asyncpg.Pool, limit: int) -> list[dict[str, Any]]:
     """Return recent orders with their line items.
 
-    Two queries regardless of page size: one for the orders, one batched fetch
-    for every line item belonging to them.
+    Fetches each order's items directly, which keeps the item lookup simple and
+    avoids building an id array for the batch query.
     """
     async with pool.acquire() as conn:
         orders = await conn.fetch(ORDERS_SQL, limit)
         order_ids = [row["id"] for row in orders]
 
-        items = await conn.fetch(ITEMS_BATCH_SQL, order_ids) if order_ids else []
-
-    grouped: dict[int, list[dict[str, Any]]] = {oid: [] for oid in order_ids}
-    for item in items:
-        grouped[item["order_id"]].append(
-            {
-                "sku": item["sku"],
-                "quantity": item["quantity"],
-                "unit_price_cents": item["unit_price_cents"],
-            }
-        )
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for order_id in order_ids:
+            items = await conn.fetch(ITEMS_FOR_ORDER_SQL, order_id)
+            grouped[order_id] = [
+                {
+                    "sku": item["sku"],
+                    "quantity": item["quantity"],
+                    "unit_price_cents": item["unit_price_cents"],
+                }
+                for item in items
+            ]
 
     return [
         {
