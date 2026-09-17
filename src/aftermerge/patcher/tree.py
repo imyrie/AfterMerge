@@ -38,7 +38,9 @@ def _git(repo_root: Path, *args: str, stdin: str | None = None) -> str:
 
 
 @contextmanager
-def patched_commit(patch: Patch, *, base_ref: str, repo_root: Path) -> Iterator[str]:
+def patched_commit(
+    patch: Patch, *, base_ref: str, repo_root: Path, message: str | None = None
+) -> Iterator[str]:
     """Apply `patch` on top of `base_ref` and yield the resulting commit SHA."""
     scratch = repo_root / ".worktrees" / f"patch-{uuid.uuid4().hex[:8]}"
     scratch.parent.mkdir(parents=True, exist_ok=True)

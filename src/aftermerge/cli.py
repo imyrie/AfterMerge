@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import typer
@@ -18,11 +19,19 @@ from aftermerge.investigator.code_map import (
     changed_files,
     diff_for,
 )
-from aftermerge.patcher.fix import propose_fix
+from aftermerge.patcher.fix import CANDIDATE_DIR, CANDIDATE_NAME, propose_fix
 from aftermerge.patcher.patch import Patch, PatchRejected
 from aftermerge.patcher.proposer import PatchContext, RevertProposer
+from aftermerge.patcher.pullrequest import (
+    PullRequestError,
+    create_branch,
+    gh_command,
+    infer_base,
+    push_branch,
+)
 from aftermerge.patcher.validate import validate as validate_patch
 from aftermerge.report import render as report_render
+from aftermerge.report.pull_request import render_pull_request
 from aftermerge.reproducer import capture as capture_mod
 from aftermerge.reproducer.differential import (
     DEFAULT_REPEAT,
@@ -36,6 +45,7 @@ from aftermerge.store.repositories import (
     CapturedRequestRepository,
     DeploymentRepository,
     FactRepository,
+    HypothesisRepository,
     IncidentRepository,
     VerificationRepository,
 )
@@ -837,6 +847,131 @@ def fix(
     rel = outcome.patch_path.relative_to(repo_root)  # type: ignore[union-attr]
     console.print(f"\n[green]validated[/green] {rel} ({outcome.accepted.patch.strategy})")  # type: ignore[union-attr]
     console.print(outcome.summary)
+
+
+@app.command()
+def pr(
+    branch: str | None = typer.Option(None, help="Branch name. Defaults to aftermerge/fix-<sha>."),
+    base: str | None = typer.Option(None, help="PR target branch. Inferred from the bad commit."),
+    push: bool = typer.Option(False, "--push", help="Push the branch to the remote."),
+    open_pr: bool = typer.Option(False, "--open", help="Also run `gh pr create --draft`."),
+) -> None:
+    """Build a branch and a pull request body from a validated fix.
+
+    Local by default. A pull request notifies people and is awkward to retract,
+    so going outward takes an explicit flag and opening one is never a side
+    effect of an investigation. Nothing here merges anything, ever.
+    """
+    engine = _prepared_engine()
+    repo_root = Path.cwd()
+    patch_path = repo_root / CANDIDATE_DIR / CANDIDATE_NAME
+
+    if not patch_path.is_file():
+        console.print(
+            "[yellow]no validated fix at .aftermerge/candidate.patch; run `aftermerge fix`[/yellow]"
+        )
+        raise typer.Exit(code=2)
+
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        found = IncidentRepository(session).list_recent(limit=1)
+        if not found:
+            console.print("[yellow]no incidents; run `aftermerge detect` first[/yellow]")
+            raise typer.Exit(code=2)
+        incident = found[0]
+
+        validation: dict[str, object] = {}
+        for hypothesis in HypothesisRepository(session).for_incident(incident.id):
+            for verification in VerificationRepository(session).for_hypothesis(hypothesis.id):
+                if verification.method == "patch_validation":
+                    validation = dict(verification.metrics)
+        if not validation:
+            console.print(
+                "[yellow]no recorded patch validation; run `aftermerge fix` first[/yellow]"
+            )
+            raise typer.Exit(code=2)
+
+        captured = CapturedRequestRepository(session).for_incident(incident.id)
+        replayable = [c for c in captured if c.replay_safe]
+        investigation = investigator_service.investigate(
+            session, incident, repo_root=repo_root, source_prefix=DEFAULT_SOURCE_PREFIX
+        )
+        strategy = str(validation.get("strategy") or "repair")
+        candidate = Patch.from_file(patch_path, strategy=strategy, origin="aftermerge")
+
+        message = (
+            f"Fix {incident.severity} regression in {incident.service} {incident.route}\n\n"
+            f"{strategy.capitalize()} of {incident.candidate_version}. Validated by replay:\n"
+            f"{validation.get('summary', '')}\n"
+        )
+        mutating = bool(
+            replayable and replayable[0].method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        )
+        title, body = render_pull_request(
+            investigation,
+            strategy=strategy,
+            validation=validation,
+            diffstat="",
+            request_shapes=len(captured),
+            envelope_is_mutating=mutating,
+        )
+
+    target = base or infer_base(incident.candidate_version, repo_root=repo_root)
+    name = branch or f"aftermerge/fix-{incident.candidate_version}"
+
+    try:
+        fix_branch = create_branch(
+            candidate,
+            bad_ref=incident.candidate_version,
+            branch_name=name,
+            repo_root=repo_root,
+            message=message,
+        )
+    except PullRequestError as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(code=2) from exc
+
+    # Re-render now the diffstat exists, so the body describes the real branch.
+    title, body = render_pull_request(
+        investigation,
+        strategy=strategy,
+        validation=validation,
+        diffstat=fix_branch.diffstat,
+        request_shapes=len(captured),
+        envelope_is_mutating=mutating,
+    )
+    body_path = repo_root / CANDIDATE_DIR / "pull_request.md"
+    body_path.write_text(body)
+
+    console.print(
+        f"branch    [bold]{fix_branch.name}[/bold] at {fix_branch.sha} (off {fix_branch.base})"
+    )
+    console.print(f"base      {target}")
+    console.print(f"title     {title}")
+    console.print(f"body      {body_path.relative_to(repo_root)}  ({len(body.splitlines())} lines)")
+
+    if push:
+        push_branch(fix_branch, repo_root=repo_root)
+        console.print(f"\n[green]pushed[/green] {fix_branch.name}")
+    else:
+        console.print(f"\n[dim]not pushed. To push:[/dim]  git push -u origin {fix_branch.name}")
+
+    command = gh_command(fix_branch, target, title, body_path)
+    if open_pr:
+        if not push:
+            console.print(
+                "[yellow]--open requires --push; the branch is not on the remote[/yellow]"
+            )
+            raise typer.Exit(code=2)
+        result = subprocess.run(command, cwd=repo_root, capture_output=True, text=True)
+        if result.returncode != 0:
+            console.print(f"[red]gh pr create failed:[/red] {result.stderr.strip()[:400]}")
+            raise typer.Exit(code=1)
+        console.print(f"[green]opened[/green] {result.stdout.strip()}")
+    else:
+        console.print("[dim]not opened. To open a draft PR:[/dim]")
+        console.print("  " + " ".join(command))
+
+    console.print("\n[dim]Nothing merges automatically. A person reviews and merges.[/dim]")
 
 
 if __name__ == "__main__":

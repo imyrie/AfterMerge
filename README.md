@@ -2,6 +2,16 @@
 
 Closed-loop production regression pipeline: **detect → investigate → reproduce → test → patch → verify → PR.**
 
+The loop is complete:
+
+```bash
+make up
+aftermerge detect && aftermerge investigate   # find it, correlate it to a commit
+aftermerge capture && aftermerge verify       # reproduce it in isolation
+aftermerge certify                            # a test that fails@bad, passes@good
+aftermerge fix && aftermerge pr               # a validated patch and a PR body
+```
+
 Every conclusion is backed by a recorded artifact — a SQL result, a process exit code, a diff — rather than
 a model's opinion. See [docs/PLAN.md](docs/PLAN.md) for the architecture and [docs/slice-0.md](docs/slice-0.md)
 for the current build checklist.
@@ -25,7 +35,7 @@ for the current build checklist.
 | 2 / Gate | Automated fail@bad / pass@good validation | **done** |
 | 3 / Validation | Patch guards, equivalence oracle, four checks | **done** |
 | 3 / Proposal | Generate a candidate fix | **done** |
-| 3 / Pull request | Branch, body, `--push` behind a flag | not started |
+| 3 / Pull request | Branch, body, `--push` behind a flag | **done** |
 
 ## Quickstart
 
@@ -74,6 +84,7 @@ cbb4790          2.0           12.3     156.4     770.0
 | `uv run aftermerge gate` | check a test fails@bad and passes@good (exit 0 = discriminates) |
 | `uv run aftermerge validate` | prove a candidate fix removes the fault and changes nothing else |
 | `uv run aftermerge fix` | propose a fix and keep it only if validation accepts it |
+| `uv run aftermerge pr` | build a branch and PR body locally (`--push` / `--open` to go outward) |
 | `make investigate` | detect, correlate with the diff, write `incident-report.md` |
 | `make test` / `make test-all` | fast suite / including the slow docker sandbox tests |
 | `make lint` | ruff check + format check |

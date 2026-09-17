@@ -3,7 +3,7 @@
 **Goal:** close the loop. Propose a fix, prove it works without breaking anything, and open a pull
 request whose body is the evidence.
 
-**Status:** parts 1 and 2 done (2026-09-16). Part 3 remains a plan.
+**Status:** complete (2026-09-16). All three parts done.
 
 **What makes this slice hard is not writing the patch.** A language model will happily produce a
 plausible diff. The work is establishing that the diff is *correct* — and the regression test alone
@@ -162,6 +162,32 @@ Level 3 for this slice should read as four rows, not one.
 |---|---|
 | Produces | a branch, a commit, and a PR body assembled from the incident report |
 | Exit | `aftermerge pr` produces all three **locally**; `--push` is required to go outward |
+
+**DONE.** `aftermerge pr` produces the branch and body on disk:
+
+```
+branch    aftermerge/fix-8b4fd77 at 1e84d68 (off 8b4fd77)
+base      regression/001-n-plus-one
+title     Fix critical regression in orders GET /orders
+body      .aftermerge/pull_request.md  (152 lines)
+
+not pushed. To push:  git push -u origin aftermerge/fix-8b4fd77
+not opened. To open a draft PR:
+  gh pr create --base regression/001-n-plus-one --head aftermerge/fix-8b4fd77 ... --draft
+
+Nothing merges automatically. A person reviews and merges.
+```
+
+**The base is inferred from the commit, not assumed to be `main`.** The regression lives on its own
+branch here, and a PR against `main` would target a branch that never contained the bug.
+
+**A bug this surfaced immediately:** `git branch --contains <bad_sha>` also lists AfterMerge's *own*
+fix branch, because that branch descends from the bad commit. Inferring it as the base would aim a
+pull request at its own head -- no diff, nothing to review. Branches under `aftermerge/` are now
+excluded, with a test pinning it.
+
+**The branch is built in a detached worktree and then named**, so the user's checkout and working
+tree are never touched, and the branch holds the exact tree that was validated.
 
 ### Local by default
 
