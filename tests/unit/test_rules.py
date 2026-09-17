@@ -157,3 +157,52 @@ def test_zero_baseline_work_does_not_divide_by_zero() -> None:
         comparison(ratio=1.0, p_value=1.0, candidate_p95=50), SLO_500, amplification=amp
     )
     assert result.triggered is False
+
+
+# --- error rate --------------------------------------------------------------
+#
+# SLO.max_error_rate was declared from the start and read by nothing. Scenario
+# 002 failed 62% of its requests and the only thing that noticed was latency.
+
+
+def test_a_breached_error_budget_triggers() -> None:
+    from aftermerge.detector.rules import ErrorRate
+
+    healthy_latency = comparison(ratio=1.0, p_value=1.0, candidate_p95=100)
+    result = evaluate(healthy_latency, SLO_500, error_rate=ErrorRate(baseline=0.0, candidate=0.62))
+
+    assert result.triggered
+    assert any("62.0% of requests are failing" in r for r in result.reasons)
+
+
+def test_errors_within_budget_do_not_trigger() -> None:
+    from aftermerge.detector.rules import ErrorRate
+
+    result = evaluate(
+        comparison(ratio=1.0, p_value=1.0, candidate_p95=100),
+        SLO_500,
+        error_rate=ErrorRate(baseline=0.002, candidate=0.005),
+    )
+    assert not result.triggered
+
+
+def test_errors_trigger_even_with_thin_latency_samples() -> None:
+    """A service that is failing does not need a significance test."""
+    from aftermerge.detector.rules import ErrorRate
+
+    thin = comparison(ratio=1.0, p_value=1.0, candidate_p95=100, sufficient=False)
+    result = evaluate(thin, SLO_500, error_rate=ErrorRate(baseline=0.0, candidate=0.62))
+
+    assert result.triggered
+    assert result.insufficient_data is False
+
+
+def test_failing_requests_raise_severity() -> None:
+    from aftermerge.detector.rules import ErrorRate
+
+    result = evaluate(
+        comparison(ratio=1.1, p_value=1.0, candidate_p95=100),
+        SLO_500,
+        error_rate=ErrorRate(baseline=0.0, candidate=0.62),
+    )
+    assert result.severity == "major"

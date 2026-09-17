@@ -9,7 +9,10 @@ SELECT
     round(quantile(0.50)(Duration) / 1e6, 1)           AS p50_ms,
     round(quantile(0.95)(Duration) / 1e6, 1)           AS p95_ms,
     round(quantile(0.99)(Duration) / 1e6, 1)           AS p99_ms,
-    countIf(StatusCode = 'STATUS_CODE_ERROR')          AS errors
+    -- 'Error', not 'STATUS_CODE_ERROR'. The ClickHouse exporter writes the short
+    -- form, so the long one silently matched nothing and this column read 0 even
+    -- while 62% of requests were failing.
+    countIf(StatusCode = 'Error')                      AS errors
 FROM otel_traces
 WHERE ServiceName = {service:String}
   AND SpanKind = 'Server'

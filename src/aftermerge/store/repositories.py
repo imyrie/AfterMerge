@@ -216,6 +216,64 @@ class HypothesisRepository:
         self._session.flush()
         return hypothesis
 
+    def supersede(
+        self,
+        *,
+        incident_id: uuid.UUID,
+        statement: str,
+        kind: str,
+        score: float,
+        supporting_fact_ids: Sequence[uuid.UUID],
+        generated_by: str,
+    ) -> Hypothesis:
+        """Propose, or refresh the existing conclusion from the same source.
+
+        Re-running an investigation must not stack a second, contradictory
+        hypothesis beside the first: the stale one can outrank the current one on
+        score and be the only thing a reader sees.
+
+        Updated in place rather than deleted and re-inserted, because
+        verifications reference a hypothesis by id -- deleting one would cascade
+        and destroy level-3 evidence that was expensive and honest to obtain.
+        """
+        existing = (
+            self._session.execute(
+                select(Hypothesis).where(
+                    # Matched on source alone. The kind can legitimately change
+                    # between runs -- a mechanical correlation weakens to a timing
+                    # one when the work delta turns out to be noise -- and that is
+                    # an update to one claim, not a second contradictory claim.
+                    Hypothesis.incident_id == incident_id,
+                    Hypothesis.generated_by == generated_by,
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+        if existing is None:
+            return self.propose(
+                incident_id=incident_id,
+                statement=statement,
+                kind=kind,
+                score=score,
+                supporting_fact_ids=supporting_fact_ids,
+                generated_by=generated_by,
+            )
+
+        if not supporting_fact_ids:
+            raise ValueError("a hypothesis must cite at least one supporting fact")
+        if not 0.0 <= score <= 1.0:
+            raise ValueError(f"score must be within [0, 1], got {score}")
+
+        existing.statement = statement
+        existing.kind = kind
+        existing.score = score
+        existing.supporting_fact_ids = list(supporting_fact_ids)
+        existing.created_at = datetime.now(UTC)
+        self._session.flush()
+        return existing
+
     def for_incident(self, incident_id: uuid.UUID) -> list[Hypothesis]:
         stmt = (
             select(Hypothesis)

@@ -22,6 +22,16 @@ from aftermerge.store.tables import Fact, Incident
 #: Correlation resting on timing alone can never outrank a mechanical match.
 TEMPORAL_ONLY_CEILING = 0.35
 
+#: Additional operations per request below which "new work" is measurement noise.
+#:
+#: Found the hard way. On a regression that changed latency but not work at all,
+#: the candidate measured 2.04 operations per request against a baseline of 2.00 --
+#: four hundredths of an operation, from traces that flushed mid-window. That was
+#: enough to take the mechanical branch, score 0.04/0.04 as a perfect match, and
+#: report "explains 100% of the new work ... 0 of the 0 additional database
+#: operations". Half an operation per request is not an operation.
+MATERIAL_WORK_DELTA = 1.0
+
 
 @dataclass(frozen=True)
 class SiteAttribution:
@@ -45,6 +55,15 @@ class Correlation:
     basis: str
     score: float
     statement: str
+
+    @property
+    def kind(self) -> str:
+        """How the claim is grounded, carried into the stored hypothesis.
+
+        A reader must be able to tell "the diff accounts for the new work" from
+        "the diff merely deployed just beforehand" without re-deriving it.
+        """
+        return "change_correlation" if self.basis == "code_site_overlap" else "temporal_correlation"
 
     @property
     def implicated_files(self) -> tuple[str, ...]:
@@ -119,7 +138,7 @@ def correlate(
     new_work_total = sum(a.delta for a in attributions if a.delta > 0)
     new_work_attributed = sum(a.delta for a in attributions if a.changed and a.delta > 0)
 
-    if new_work_total > 0:
+    if new_work_total >= MATERIAL_WORK_DELTA:
         basis = "code_site_overlap"
         score = new_work_attributed / new_work_total
         if score > 0:
@@ -138,9 +157,16 @@ def correlate(
     else:
         basis = "temporal_only"
         score = TEMPORAL_ONLY_CEILING
+        measured = (
+            f" (measured {new_work_total:+.2f} operations per request, below the "
+            f"{MATERIAL_WORK_DELTA:.0f}-operation noise floor)"
+            if new_work_total
+            else ""
+        )
         statement = (
             f"Commit {commit.sha} ({commit.subject!r}) deployed immediately before onset. "
-            "No change in work per request was observed, so this rests on timing alone."
+            f"Work per request did not meaningfully change{measured}, so this rests on timing "
+            "alone: the regression is in how long the same operations take, not how many run."
         )
 
     return Correlation(

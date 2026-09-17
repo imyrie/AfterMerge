@@ -96,3 +96,56 @@ def test_missing_span_evidence_still_produces_a_timing_correlation() -> None:
     result = correlate(incident(), [], repo_root=REPO, source_prefix="fixtures/shopdemo")
     assert result is not None
     assert result.basis == "temporal_only"
+
+
+# --- the noise floor ---------------------------------------------------------
+
+
+def test_a_fractional_work_delta_is_noise_not_new_work() -> None:
+    """Found by scenario 002, which changed latency but not work at all.
+
+    The candidate measured 2.04 operations per request against 2.00 -- four
+    hundredths, from traces flushing mid-window. That was enough to take the
+    mechanical branch, score 0.04/0.04 as a perfect match, and report
+    "explains 100% of the new work ... 0 of the 0 additional operations".
+    """
+    fact = span_fact(
+        [["cbb4790", "orders/repository.py", 2.00], ["8b4fd77", "orders/repository.py", 2.04]]
+    )
+    result = correlate(incident(), [fact], repo_root=REPO, source_prefix="fixtures/shopdemo")
+
+    assert result is not None
+    assert result.basis == "temporal_only"
+    assert result.score == TEMPORAL_ONLY_CEILING
+    assert "did not meaningfully change" in result.statement
+    assert "noise floor" in result.statement
+
+
+def test_a_whole_extra_operation_is_real_work() -> None:
+    """The floor must not swallow a genuine one-query regression."""
+    fact = span_fact(
+        [["cbb4790", "orders/repository.py", 2.0], ["8b4fd77", "orders/repository.py", 3.0]]
+    )
+    result = correlate(incident(), [fact], repo_root=REPO, source_prefix="fixtures/shopdemo")
+
+    assert result is not None
+    assert result.basis == "code_site_overlap"
+
+
+def test_the_kind_reflects_how_the_claim_is_grounded() -> None:
+    """A reader must distinguish 'the diff explains it' from 'the diff preceded it'."""
+    mechanical = span_fact(
+        [["cbb4790", "orders/repository.py", 2.0], ["8b4fd77", "orders/repository.py", 51.0]]
+    )
+    timing = span_fact(
+        [["cbb4790", "orders/repository.py", 2.0], ["8b4fd77", "orders/repository.py", 2.0]]
+    )
+
+    assert (
+        correlate(incident(), [mechanical], repo_root=REPO, source_prefix="fixtures/shopdemo").kind
+        == "change_correlation"
+    )
+    assert (
+        correlate(incident(), [timing], repo_root=REPO, source_prefix="fixtures/shopdemo").kind
+        == "temporal_correlation"
+    )

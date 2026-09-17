@@ -36,6 +36,7 @@ for the current build checklist.
 | 3 / Validation | Patch guards, equivalence oracle, four checks | **done** |
 | 3 / Proposal | Generate a candidate fix | **done** |
 | 3 / Pull request | Branch, body, `--push` behind a flag | **done** |
+| Scenario 002 | Inverse signal profile — latency up, work flat | **done** — see docs/scenario-002.md |
 
 ## Quickstart
 

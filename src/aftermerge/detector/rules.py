@@ -49,6 +49,23 @@ class Amplification:
 
 
 @dataclass(frozen=True)
+class ErrorRate:
+    """Failed requests as a fraction of the total, per version.
+
+    `SLO.max_error_rate` was declared from the start and read by nothing, so a
+    regression that made most requests fail could only ever be caught by its
+    latency. Errors are the more direct signal and deserve their own rule.
+    """
+
+    baseline: float
+    candidate: float
+
+    @property
+    def worsened(self) -> float:
+        return self.candidate - self.baseline
+
+
+@dataclass(frozen=True)
 class Detection:
     triggered: bool
     insufficient_data: bool
@@ -56,6 +73,7 @@ class Detection:
     reasons: tuple[str, ...]
     comparison: Comparison
     amplification: Amplification | None = None
+    error_rate: ErrorRate | None = None
 
     @property
     def headline(self) -> str:
@@ -84,6 +102,7 @@ def evaluate(
     slo: SLO,
     *,
     amplification: Amplification | None = None,
+    error_rate: ErrorRate | None = None,
     alpha: float = DEFAULT_ALPHA,
     min_ratio: float = DEFAULT_MIN_RATIO,
     min_amplification: float = DEFAULT_MIN_AMPLIFICATION,
@@ -96,8 +115,9 @@ def evaluate(
     """
     amp_ratio = amplification.ratio if amplification else math.nan
     amplified = not math.isnan(amp_ratio) and amp_ratio >= min_amplification
+    failing = error_rate is not None and error_rate.candidate > slo.max_error_rate
 
-    if not comparison.sufficient_data and not amplified:
+    if not comparison.sufficient_data and not amplified and not failing:
         return Detection(
             triggered=False,
             insufficient_data=True,
@@ -115,6 +135,11 @@ def evaluate(
     slo_breached = comparison.candidate_p95_ms > slo.p95_ms
 
     reasons: list[str] = []
+    if failing and error_rate is not None:
+        reasons.append(
+            f"{error_rate.candidate:.1%} of requests are failing, against an objective of "
+            f"{slo.max_error_rate:.1%} (baseline {error_rate.baseline:.1%})"
+        )
     if amplified and amplification is not None:
         where = f" in {amplification.code_site}" if amplification.code_site else ""
         reasons.append(
@@ -136,7 +161,7 @@ def evaluate(
 
     # Any one signal is enough. Work amplification is deliberately independent
     # of the latency test, because that is precisely the case latency misses.
-    triggered = (significant and material) or slo_breached or amplified
+    triggered = (significant and material) or slo_breached or amplified or failing
 
     if not triggered and not reasons:
         reasons.append(
@@ -148,8 +173,11 @@ def evaluate(
     return Detection(
         triggered=triggered,
         insufficient_data=False,
-        severity=_severity(comparison.ratio, slo_breached, amp_ratio) if triggered else None,
+        severity=(
+            _severity(comparison.ratio, slo_breached or failing, amp_ratio) if triggered else None
+        ),
         reasons=tuple(reasons),
         comparison=comparison,
         amplification=amplification,
+        error_rate=error_rate,
     )

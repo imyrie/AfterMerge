@@ -1,0 +1,52 @@
+# Slice 0's fixture proves AfterMerge on a regression that multiplies round trips.
+# This one has the inverse signal profile: latency rises sharply while the number
+# of database operations per request does not move at all.
+#
+# It exists to test whether the architecture generalises or was fitted to the N+1.
+
+id: unindexed_cast
+title: Index-defeating cast in the batched item lookup
+
+service: orders
+route_service: gateway
+route: "GET /orders"
+
+commits:
+  good_sha: 2a99983
+  bad_sha: b4726eb
+  branch: regression/002-unindexed-cast
+
+slo:
+  p95_ms: 500
+  error_rate: 0.01
+
+traffic:
+  script: fixtures/shopdemo/loadgen/browse.js
+  rps: 20
+  duration: 60s
+
+expect:
+  detected: true
+  root_cause_file: fixtures/shopdemo/orders/repository.py
+  code_site: orders/repository.py
+  # The distinguishing feature: work per request is UNCHANGED. Comparing ids as
+  # text defeats the index on order_items(order_id), so the same two queries run,
+  # one of them via a sequential scan over 800k rows instead of an index lookup.
+  db_spans_per_request:
+    good: 2
+    bad: 2
+  # Measured directly: 1.4ms indexed vs 228ms scanned.
+  query_ms:
+    good: 1.4
+    bad: 228.0
+
+# What this scenario is really testing -- the honest-failure paths, which until
+# now had unit tests but no end-to-end demonstration.
+expect_behaviour:
+  detector: "fires on latency alone, with no work amplification to help it"
+  correlation: "temporal_only -- no new work exists for the diff to explain"
+  testgen: "declines: with work unchanged there is no assertion that separates the commits"
+
+verify:
+  normalisations: []
+  suite_command: null

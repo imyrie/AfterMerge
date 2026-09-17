@@ -37,9 +37,16 @@ def test_at_least_one_scenario_exists() -> None:
 
 @pytest.mark.parametrize("path", SCENARIOS, ids=lambda p: p.stem)
 def test_scenario_paths_exist(path: Path) -> None:
+    """Referenced files must exist. Not every scenario references the same ones.
+
+    A recorded candidate fix is optional: a scenario can legitimately document a
+    regression without one, and requiring the key would push someone to commit a
+    placeholder patch to keep the suite green.
+    """
     scenario = _load(path)
-    for key in ("patch",):
-        assert (ROOT / scenario["commits"][key]).is_file(), f"missing {key}"
+    patch = scenario["commits"].get("patch")
+    if patch is not None:
+        assert (ROOT / patch).is_file(), f"missing patch {patch}"
     assert (ROOT / scenario["expect"]["root_cause_file"]).is_file()
 
 

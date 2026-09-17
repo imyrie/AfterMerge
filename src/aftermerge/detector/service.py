@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from aftermerge.detector import windows
-from aftermerge.detector.rules import SLO, Amplification, Detection, evaluate
+from aftermerge.detector.rules import SLO, Amplification, Detection, ErrorRate, evaluate
 from aftermerge.detector.stats import DEFAULT_MIN_SAMPLES, Comparison, compare
 from aftermerge.investigator import evidence
 from aftermerge.store.repositories import IncidentRepository
@@ -98,6 +98,24 @@ def _amplification(
     )
 
 
+def _error_rate(result: client.FactResult, baseline: str, candidate: str) -> ErrorRate | None:
+    """Failed requests as a fraction of the total, for each version."""
+    if not {"version", "requests", "errors"} <= set(result.columns):
+        return None
+    v_idx = result.columns.index("version")
+    r_idx = result.columns.index("requests")
+    e_idx = result.columns.index("errors")
+
+    rates: dict[str, float] = {}
+    for row in result.rows:
+        requests = float(row[r_idx])
+        rates[str(row[v_idx])] = float(row[e_idx]) / requests if requests else 0.0
+
+    if baseline not in rates and candidate not in rates:
+        return None
+    return ErrorRate(baseline=rates.get(baseline, 0.0), candidate=rates.get(candidate, 0.0))
+
+
 def _scalar_for(result: client.FactResult, version: str, column: str) -> float | None:
     """Pull one column's value for one version out of a per-version result."""
     if "version" not in result.columns or column not in result.columns:
@@ -144,13 +162,21 @@ def detect(
     )
     comparison: Comparison = compare(baseline_samples, candidate_samples, min_samples=min_samples)
 
-    # Fetched before the decision, not after: work amplification is an input to
-    # the verdict, and is the signal that survives when latency does not.
+    # Both fetched before the decision. Work amplification and error rate are
+    # inputs to the verdict, not evidence gathered after one has been reached.
     spans = client.run(
         "span_count_per_trace", client=ch, service=service, lookback_minutes=lookback_minutes
     )
+    quantiles = client.run(
+        "latency_quantiles",
+        client=ch,
+        service=route_service,
+        route=slo.route,
+        lookback_minutes=lookback_minutes,
+    )
     amplification = _amplification(spans, window.baseline_version, window.candidate_version)
-    detection = evaluate(comparison, slo, amplification=amplification)
+    errors = _error_rate(quantiles, window.baseline_version, window.candidate_version)
+    detection = evaluate(comparison, slo, amplification=amplification, error_rate=errors)
 
     if not detection.triggered:
         return DetectionOutcome(window=window, detection=detection, incident=None, fact_count=0)

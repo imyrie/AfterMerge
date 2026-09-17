@@ -90,11 +90,14 @@ def render(investigation: Investigation) -> str:
             # The number is the fraction of new work the change accounts for, not
             # a subjective confidence. Labelling it "confidence" would overstate
             # what was actually computed.
-            label = (
-                f"explains {float(h.score):.0%} of the new work"
-                if h.kind == "change_correlation"
-                else f"score {float(h.score):.2f}"
-            )
+            if h.kind == "change_correlation":
+                label = f"explains {float(h.score):.0%} of the new work"
+            elif h.kind == "temporal_correlation":
+                # Saying "explains 35% of the new work" when no new work exists
+                # invents a measurement. This claim rests on timing only.
+                label = f"timing correlation only (score {float(h.score):.2f})"
+            else:
+                label = f"score {float(h.score):.2f}"
             out.append(f"**{label}** — {h.statement}")
             out.append("")
             out.append(f"<sub>basis: {h.kind}; cites {len(h.supporting_fact_ids)} fact(s)</sub>")

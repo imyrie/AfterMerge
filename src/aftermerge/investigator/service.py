@@ -47,10 +47,10 @@ def investigate(
             f.id for f in facts[:1]
         ]
         if supporting:
-            HypothesisRepository(session).propose(
+            HypothesisRepository(session).supersede(
                 incident_id=incident.id,
                 statement=correlation.statement,
-                kind="change_correlation",
+                kind=correlation.kind,
                 score=correlation.score,
                 supporting_fact_ids=supporting,
                 generated_by="correlation.correlate",

@@ -362,6 +362,7 @@ def capture(
                 r.method,
                 r.path,
                 "&".join(f"{k}={v}" for k, v in r.query.items()) or "-",
+                str(r.status_code or "-"),
                 str(r.observations),
                 "yes" if r.replay_safe else "no",
                 r.unreplayable_reason or "",
@@ -374,14 +375,14 @@ def capture(
         return
 
     table = Table(title="captured requests", title_justify="left", header_style="bold")
-    for column in ("method", "path", "query", "seen", "replayable"):
+    for column in ("method", "path", "query", "status", "seen", "replayable"):
         table.add_column(column, no_wrap=True)
     for row in rows:
-        table.add_row(*row[:5])
+        table.add_row(*row[:6])
     console.print(table)
 
     for row in rows:
-        if row[5]:
+        if row[6]:
             console.print(f"\n[yellow]{row[0]} {row[1]} not replayable:[/yellow] {row[5]}")
 
 

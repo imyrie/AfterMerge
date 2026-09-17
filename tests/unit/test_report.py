@@ -90,3 +90,14 @@ def test_limitations_are_reported_when_present() -> None:
 
 def test_no_hypotheses_renders_cleanly() -> None:
     assert "None proposed." in render(_investigation(with_hypothesis=False))
+
+
+def test_a_timing_only_hypothesis_is_not_labelled_as_explaining_work() -> None:
+    """Saying "explains 35% of the new work" when no new work exists invents a measurement."""
+    investigation = _investigation()
+    investigation.hypotheses[0].kind = "temporal_correlation"
+    investigation.hypotheses[0].score = 0.35
+
+    markdown = render(investigation)
+    assert "timing correlation only (score 0.35)" in markdown
+    assert "of the new work" not in markdown
