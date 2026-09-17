@@ -20,7 +20,7 @@ ORDERS_SQL = """
 ITEMS_BATCH_SQL = """
     SELECT order_id, sku, quantity, unit_price_cents
     FROM order_items
-    WHERE order_id = ANY($1::bigint[])
+    WHERE order_id::text = ANY($1::text[])
 """
 
 
@@ -34,7 +34,11 @@ async def list_orders(pool: asyncpg.Pool, limit: int) -> list[dict[str, Any]]:
         orders = await conn.fetch(ORDERS_SQL, limit)
         order_ids = [row["id"] for row in orders]
 
-        items = await conn.fetch(ITEMS_BATCH_SQL, order_ids) if order_ids else []
+        items = (
+            await conn.fetch(ITEMS_BATCH_SQL, [str(order_id) for order_id in order_ids])
+            if order_ids
+            else []
+        )
 
     grouped: dict[int, list[dict[str, Any]]] = {oid: [] for oid in order_ids}
     for item in items:
