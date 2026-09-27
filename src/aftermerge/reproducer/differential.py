@@ -45,7 +45,7 @@ class DifferentialResult:
         if self.reproduced:
             return (
                 f"Replaying {self.target} against {self.good.sha} and {self.bad.sha} in isolation "
-                f"produced {self.good.db_spans_per_request:.1f} vs "
+                f"(dataset {self.good.seed}) produced {self.good.db_spans_per_request:.1f} vs "
                 f"{self.bad.db_spans_per_request:.1f} database operations per request "
                 f"({self.ratio:.1f}x)."
             )
@@ -66,6 +66,7 @@ class DifferentialResult:
             "target": self.target,
             "good": asdict(self.good),
             "bad": asdict(self.bad),
+            "seed": self.good.seed,
             "ratio": round(self.ratio, 2),
             "threshold": self.threshold,
             "reproduced": self.reproduced,
@@ -81,11 +82,15 @@ def run_differential(
     repo_root: Path,
     repeat: int = DEFAULT_REPEAT,
     threshold: float = DEFAULT_THRESHOLD,
+    seed: Path | None = None,
 ) -> DifferentialResult:
-    with sandbox(good_ref, repo_root=repo_root) as good_box:
+    # One seed, passed to both sides. A differential across two different
+    # datasets compares databases rather than code, so this cannot be two
+    # arguments.
+    with sandbox(good_ref, repo_root=repo_root, seed=seed) as good_box:
         good = replay(good_box, envelope, repeat=repeat)
 
-    with sandbox(bad_ref, repo_root=repo_root) as bad_box:
+    with sandbox(bad_ref, repo_root=repo_root, seed=seed) as bad_box:
         bad = replay(bad_box, envelope, repeat=repeat)
 
     return DifferentialResult(target=envelope.target, good=good, bad=bad, threshold=threshold)

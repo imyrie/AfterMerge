@@ -50,7 +50,7 @@ class PatchProposer(Protocol):
     name: str
     deterministic: bool
 
-    def propose(self, context: PatchContext) -> Proposal: ...
+    def propose(self, context: PatchContext, feedback: str | None = None) -> Proposal: ...
 
 
 def _git(repo_root: Path, *args: str) -> str:
@@ -97,7 +97,8 @@ class RevertProposer:
     def __init__(self, repo_root: Path) -> None:
         self._repo_root = repo_root
 
-    def propose(self, context: PatchContext) -> Proposal:
+    def propose(self, context: PatchContext, feedback: str | None = None) -> Proposal:
+        del feedback  # deterministic; see TemplateGenerator.generate
         files = {
             path: _git(self._repo_root, "show", f"{context.good_ref}:{path}")
             for path in context.changed_files
@@ -131,6 +132,14 @@ Requirements:
   fences, no commentary, no diff.
 """
 
+RETRY_PREAMBLE = """\
+A previous fix was REJECTED by validation. Do not repeat the same approach.
+
+Why it was rejected:
+{feedback}
+
+"""
+
 
 class AnthropicProposer:
     """Attempt a repair that preserves the commit's intent."""
@@ -138,12 +147,22 @@ class AnthropicProposer:
     name = "anthropic"
     deterministic = False
 
-    def __init__(self, client: Any, model: str = "claude-sonnet-5", max_tokens: int = 4000) -> None:
+    def __init__(
+        self,
+        client: Any,
+        *,
+        repo_root: Path,
+        model: str = "claude-sonnet-5",
+        max_tokens: int = 4000,
+    ) -> None:
         self._client = client
+        # Explicit rather than falling back to the process working directory,
+        # which is only correct when the CLI happens to run from the repo root.
+        self._repo_root = repo_root
         self._model = model
         self._max_tokens = max_tokens
 
-    def propose(self, context: PatchContext) -> Proposal:
+    def propose(self, context: PatchContext, feedback: str | None = None) -> Proposal:
         files: dict[str, str] = {}
         for path in context.changed_files:
             prompt = PROMPT.format(
@@ -154,8 +173,10 @@ class AnthropicProposer:
                 code_site=context.code_site or "unknown",
                 causing_diff=context.causing_diff,
                 path=path,
-                content=_read_at(context.bad_ref, path),
+                content=_read_at(context.bad_ref, path, self._repo_root),
             )
+            if feedback:
+                prompt = RETRY_PREAMBLE.format(feedback=feedback) + prompt
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=self._max_tokens,

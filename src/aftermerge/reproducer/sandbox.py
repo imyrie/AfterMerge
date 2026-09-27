@@ -23,7 +23,24 @@ from aftermerge.reproducer import worktree
 
 COMPOSE_FILE = Path("infra/sandbox/compose.yml")
 COLLECTOR_CONFIG = Path("infra/sandbox/collector.yaml")
-SEED_FILE = Path("infra/sandbox/seed.sql")
+#: Sandboxes seed themselves rather than inheriting the commit's data, so both
+#: sides of a differential see identical rows. The default is small so startup
+#: stays fast; a scenario whose fault depends on table size selects another.
+DEFAULT_SEED = Path("infra/sandbox/seed.sql")
+LARGE_SEED = Path("infra/sandbox/seed-large.sql")
+
+#: Named datasets, so a scenario or a command line can say "large" rather than
+#: carrying a path around.
+SEEDS = {"default": DEFAULT_SEED, "large": LARGE_SEED}
+
+
+def resolve_seed(name: str | None) -> Path | None:
+    """Turn a seed name or path into a path. None means the default."""
+    if name is None:
+        return None
+    return SEEDS.get(name, Path(name))
+
+
 SCHEMA_RELPATH = Path("fixtures/shopdemo/db/01-schema.sql")
 
 STARTUP_TIMEOUT = 180
@@ -46,6 +63,10 @@ class Sandbox:
     project: str
     base_url: str
     trace_database: str
+    #: Which dataset this was measured against. Recorded because "2 operations
+    #: per request" means something different over 8,000 rows than over 400,000,
+    #: and a measurement that does not say which is not reproducible.
+    seed: str = DEFAULT_SEED.name
 
     def health(self) -> dict[str, str]:
         payload: dict[str, str] = httpx.get(f"{self.base_url}/health", timeout=10.0).json()
@@ -244,7 +265,13 @@ def _drop_trace_database(database: str) -> None:
 
 
 @contextmanager
-def sandbox(ref: str, *, repo_root: Path, keep_traces: bool = False) -> Iterator[Sandbox]:
+def sandbox(
+    ref: str,
+    *,
+    repo_root: Path,
+    keep_traces: bool = False,
+    seed: Path | None = None,
+) -> Iterator[Sandbox]:
     """Bring up the application at `ref`, and guarantee it is torn down."""
     sha = worktree.resolve(ref, repo_root=repo_root)
     worktree.ensure_image(sha, repo_root=repo_root)
@@ -259,7 +286,7 @@ def sandbox(ref: str, *, repo_root: Path, keep_traces: bool = False) -> Iterator
         "REPRO_SHA": sha,
         "REPRO_DATABASE": database,
         "REPRO_SCHEMA": str((tree / SCHEMA_RELPATH).resolve()),
-        "REPRO_SEED": str((repo_root / SEED_FILE).resolve()),
+        "REPRO_SEED": str((repo_root / (seed or DEFAULT_SEED)).resolve()),
         "REPRO_COLLECTOR_CONFIG": str((repo_root / COLLECTOR_CONFIG).resolve()),
     }
 
@@ -267,7 +294,13 @@ def sandbox(ref: str, *, repo_root: Path, keep_traces: bool = False) -> Iterator
         _compose(project, "up", "-d", "--no-build", env=env)
         url = _gateway_url(project, env)
         _await_version(url, sha)
-        yield Sandbox(sha=sha, project=project, base_url=url, trace_database=database)
+        yield Sandbox(
+            sha=sha,
+            project=project,
+            base_url=url,
+            trace_database=database,
+            seed=(seed or DEFAULT_SEED).name,
+        )
     finally:
         # -v is deliberate: the Postgres volume is throwaway, and leaving one
         # behind per replay is how a disk quietly fills up.

@@ -42,6 +42,10 @@ expect:
     bad: 1753.1
   latency_ratio_min: 5.0
 
+# This regression multiplies round trips, so it reproduces at any data volume.
+sandbox:
+  seed: default
+
 # How a candidate fix is validated (slice 3).
 verify:
   # Regex substitutions applied to response bodies before comparing the patched

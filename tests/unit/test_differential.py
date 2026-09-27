@@ -72,3 +72,66 @@ def test_replay_refuses_an_unsafe_envelope() -> None:
     unsafe = RequestEnvelope(method="POST", path="/orders", replay_safe=False)
     with pytest.raises(ReplayRefused, match="not marked replay-safe"):
         replay(object(), unsafe)  # type: ignore[arg-type]
+
+
+# --- the dataset is a property of the comparison, not of a side ---------------
+
+
+def test_both_sides_of_a_differential_get_the_same_dataset(monkeypatch) -> None:
+    """The determinism guarantee, enforced by construction rather than discipline.
+
+    `seed` is a single argument to the comparison, so running one side against
+    8,000 rows and the other against 400,000 is not expressible. A differential
+    across two datasets compares databases, not code.
+    """
+    from contextlib import contextmanager
+    from pathlib import Path
+
+    import aftermerge.reproducer.differential as diff_mod
+    from aftermerge.reproducer.differential import run_differential
+
+    seen: list[tuple[str, str | None]] = []
+
+    @contextmanager
+    def fake_sandbox(ref, *, repo_root, keep_traces=False, seed=None):
+        seen.append((ref, str(seed) if seed else None))
+        yield object()
+
+    monkeypatch.setattr(diff_mod, "sandbox", fake_sandbox)
+    monkeypatch.setattr(
+        diff_mod,
+        "replay",
+        lambda box, envelope, repeat=20: measurement("x", 2.0),
+    )
+
+    run_differential(
+        RequestEnvelope.get("/orders", limit=50),
+        good_ref="good",
+        bad_ref="bad",
+        repo_root=Path("."),
+        seed=Path("infra/sandbox/seed-large.sql"),
+    )
+
+    assert len(seen) == 2
+    assert seen[0][1] == seen[1][1] == "infra/sandbox/seed-large.sql"
+
+
+def test_the_dataset_is_reported_with_the_measurement(monkeypatch) -> None:
+    """ "2 operations per request" means something different over 8k rows than 400k."""
+    outcome = DifferentialResult(
+        target="/orders?limit=50",
+        good=ReplayMeasurement(
+            sha="good",
+            requests_sent=20,
+            failures=0,
+            db_spans_per_request=2.0,
+            code_site="orders/repository.py",
+            trace_database="repro_good",
+            seed="seed-large.sql",
+        ),
+        bad=measurement("bad", 51.0),
+        threshold=3.0,
+    )
+
+    assert "dataset seed-large.sql" in outcome.summary
+    assert outcome.as_dict()["seed"] == "seed-large.sql"

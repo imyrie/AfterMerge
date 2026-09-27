@@ -47,6 +47,21 @@ expect_behaviour:
   correlation: "temporal_only -- no new work exists for the diff to explain"
   testgen: "declines: with work unchanged there is no assertion that separates the commits"
 
+# The sandbox dataset this scenario needs.
+#
+# The default seed is small so sandboxes start quickly, which makes it unable to
+# reproduce this fault at all: over 8,000 rows the cast costs almost nothing,
+# and only near 400,000 does the sequential scan dominate. Pass it through:
+#
+#   aftermerge replay --seed large
+#   aftermerge certify --seed large
+#   aftermerge fix --seed large
+#
+# Both sides of any comparison receive the same seed by construction -- it is a
+# single argument, not one per side -- so the determinism guarantee holds.
+sandbox:
+  seed: large
+
 verify:
   normalisations: []
   suite_command: null

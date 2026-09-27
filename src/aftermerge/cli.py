@@ -7,9 +7,11 @@ import subprocess
 from pathlib import Path
 
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
+from aftermerge import llm
 from aftermerge.detector import service as detector_service
 from aftermerge.detector import windows
 from aftermerge.detector.rules import SLO
@@ -21,7 +23,7 @@ from aftermerge.investigator.code_map import (
 )
 from aftermerge.patcher.fix import CANDIDATE_DIR, CANDIDATE_NAME, propose_fix
 from aftermerge.patcher.patch import Patch, PatchRejected
-from aftermerge.patcher.proposer import PatchContext, RevertProposer
+from aftermerge.patcher.proposer import AnthropicProposer, PatchContext, RevertProposer
 from aftermerge.patcher.pullrequest import (
     PullRequestError,
     create_branch,
@@ -39,6 +41,7 @@ from aftermerge.reproducer.differential import (
     run_differential,
 )
 from aftermerge.reproducer.envelope import RequestEnvelope
+from aftermerge.reproducer.sandbox import SEEDS, resolve_seed
 from aftermerge.reproducer.verify import verify_differential
 from aftermerge.store import db as store_db
 from aftermerge.store.repositories import (
@@ -53,14 +56,28 @@ from aftermerge.telemetry import catalog, client
 from aftermerge.testgen import context as testgen_context
 from aftermerge.testgen.certify import certify as certify_test
 from aftermerge.testgen.gate import run_gate
-from aftermerge.testgen.generator import TemplateGenerator
+from aftermerge.testgen.generator import AnthropicGenerator, TemplateGenerator
 from aftermerge.testgen.writer import write as write_candidate
+
+# Read .env before any command touches os.environ. `.env.example` has documented
+# ANTHROPIC_API_KEY since the model-backed paths landed, but nothing loaded the
+# file, so putting a key there did nothing and the error message said it was
+# unset. Loaded here rather than in llm.py because .env also carries the
+# ClickHouse and Postgres settings other modules read.
+load_dotenv()
+
+SEED_HELP = (
+    f"Sandbox dataset: {'/'.join(SEEDS)} or a path. Volume-dependent faults need a larger one."
+)
 
 app = typer.Typer(
     help="AfterMerge: closed-loop production regression pipeline.",
     no_args_is_help=True,
 )
 console = Console()
+
+GENERATOR_HELP = "template (deterministic, no credentials) or anthropic (model-backed)."
+PROPOSER_HELP = "revert (deterministic, no credentials) or anthropic (model-backed)."
 
 deployments_app = typer.Typer(help="Record and inspect observed deploys.", no_args_is_help=True)
 app.add_typer(deployments_app, name="deployments")
@@ -394,6 +411,7 @@ def replay(
     threshold: float = typer.Option(
         DEFAULT_THRESHOLD, help="Amplification ratio to call it reproduced."
     ),
+    seed: str | None = typer.Option(None, help=SEED_HELP),
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
 ) -> None:
     """Replay a captured request against two commits in isolation.
@@ -437,6 +455,7 @@ def replay(
         repo_root=repo_root,
         repeat=repeat,
         threshold=threshold,
+        seed=resolve_seed(seed),
     )
 
     if as_json:
@@ -504,7 +523,9 @@ def verify(
 
 
 @app.command()
-def testgen() -> None:
+def testgen(
+    generator: str = typer.Option("template", help=GENERATOR_HELP),
+) -> None:
     """Write a regression test encoding the incident's measured behaviour.
 
     Deterministic by default: the template generator needs no credentials, and
@@ -542,7 +563,7 @@ def testgen() -> None:
         )
         raise typer.Exit(code=2)
 
-    candidate = TemplateGenerator().generate(ctx)
+    candidate = _build_generator(generator).generate(ctx)  # type: ignore[attr-defined]
     path = write_candidate(candidate, repo_root=repo_root)
 
     rel = path.relative_to(repo_root)
@@ -559,6 +580,7 @@ def gate(
     test: Path = typer.Option(..., help="Path to the generated test file."),
     good: str = typer.Option(..., help="Commit the test must PASS on."),
     bad: str = typer.Option(..., help="Commit the test must FAIL on."),
+    seed: str | None = typer.Option(None, help=SEED_HELP),
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
 ) -> None:
     """Check that a test fails on the bad commit and passes on the good one.
@@ -571,7 +593,9 @@ def gate(
         console.print(f"[yellow]no such test file: {test}[/yellow]")
         raise typer.Exit(code=2)
 
-    result = run_gate(test, good_ref=good, bad_ref=bad, repo_root=repo_root)
+    result = run_gate(
+        test, good_ref=good, bad_ref=bad, repo_root=repo_root, seed=resolve_seed(seed)
+    )
 
     if as_json:
         console.print_json(
@@ -605,7 +629,9 @@ def gate(
 
 @app.command()
 def certify(
+    generator: str = typer.Option("template", help=GENERATOR_HELP),
     max_attempts: int = typer.Option(3, help="Generation attempts before giving up."),
+    seed: str | None = typer.Option(None, help=SEED_HELP),
 ) -> None:
     """Generate a regression test and keep it only if it passes the gate.
 
@@ -645,7 +671,12 @@ def certify(
         raise typer.Exit(code=2)
 
     console.print("generating and gating (each attempt builds two sandboxes)...\n")
-    outcome = certify_test(ctx, TemplateGenerator(), repo_root=repo_root, max_attempts=max_attempts)
+    outcome = certify_test(
+        ctx,
+        _build_generator(generator),  # type: ignore[arg-type]
+        repo_root=repo_root,
+        max_attempts=max_attempts,
+    )
 
     for index, attempt in enumerate(outcome.attempts, start=1):
         mark = "accepted" if attempt.passed else "rejected"
@@ -674,6 +705,31 @@ def certify(
     console.print(outcome.summary)
 
 
+def _build_generator(name: str) -> object:
+    """Pick a test generator, failing clearly when a model was asked for."""
+    if name == "template":
+        return TemplateGenerator()
+    if name == "anthropic":
+        try:
+            return AnthropicGenerator(llm.get_client(), model=llm.model_name())
+        except llm.LLMUnavailable as exc:
+            console.print(f"[yellow]{exc}[/yellow]")
+            raise typer.Exit(code=2) from exc
+    raise typer.BadParameter(f"unknown generator {name!r}; use template or anthropic")
+
+
+def _build_proposer(name: str, repo_root: Path) -> object:
+    if name == "revert":
+        return RevertProposer(repo_root)
+    if name == "anthropic":
+        try:
+            return AnthropicProposer(llm.get_client(), repo_root=repo_root, model=llm.model_name())
+        except llm.LLMUnavailable as exc:
+            console.print(f"[yellow]{exc}[/yellow]")
+            raise typer.Exit(code=2) from exc
+    raise typer.BadParameter(f"unknown proposer {name!r}; use revert or anthropic")
+
+
 def _scenario_verify_options(repo_root: Path) -> tuple[tuple[str, ...], list[str] | None]:
     """Normalisations and suite command, as declared in the scenario file."""
     import yaml
@@ -692,6 +748,7 @@ def validate(
     strategy: str = typer.Option("repair", help="repair or revert -- stated in the PR."),
     origin: str = typer.Option("hand-written", help="What produced this patch."),
     repeat: int = typer.Option(10, help="Requests per side when measuring work."),
+    seed: str | None = typer.Option(None, help=SEED_HELP),
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
 ) -> None:
     """Establish that a candidate fix removes the fault and changes nothing else.
@@ -750,6 +807,7 @@ def validate(
             normalisations=normalisations,
             suite_command=suite_command,
             repeat=repeat,
+            seed=resolve_seed(seed),
         )
     except PatchRejected as exc:
         if as_json:
@@ -772,7 +830,9 @@ def validate(
 
 @app.command()
 def fix(
+    proposer: str = typer.Option("revert", help=PROPOSER_HELP),
     max_attempts: int = typer.Option(3, help="Proposals before giving up."),
+    seed: str | None = typer.Option(None, help=SEED_HELP),
 ) -> None:
     """Propose a fix and keep it only if validation accepts it.
 
@@ -818,7 +878,11 @@ def fix(
 
     console.print("proposing and validating (each attempt builds three sandboxes)...\n")
     outcome = propose_fix(
-        patch_context, RevertProposer(repo_root), repo_root=repo_root, max_attempts=max_attempts
+        patch_context,
+        _build_proposer(proposer, repo_root),  # type: ignore[arg-type]
+        repo_root=repo_root,
+        max_attempts=max_attempts,
+        seed=seed,
     )
 
     for index, attempt in enumerate(outcome.attempts, start=1):

@@ -87,14 +87,24 @@ class GateResult:
         return f"{self.test_path.name} does not discriminate: " + "; ".join(faults)
 
 
-def _run_at(test_path: Path, ref: str, expectation: str, *, repo_root: Path) -> GateRun:
+def _run_at(
+    test_path: Path,
+    ref: str,
+    expectation: str,
+    *,
+    repo_root: Path,
+    seed: Path | None = None,
+) -> GateRun:
+    env = {"AFTERMERGE_TEST_REF": ref}
+    if seed is not None:
+        env["AFTERMERGE_TEST_SEED"] = str(seed)
     process = subprocess.run(
         [sys.executable, "-m", "pytest", "-m", "slow", "-q", str(test_path)],
         cwd=repo_root,
         capture_output=True,
         text=True,
         timeout=TIMEOUT_SECONDS,
-        env={**os.environ, "AFTERMERGE_TEST_REF": ref},
+        env={**os.environ, **env},
     )
     return GateRun(
         ref=ref,
@@ -104,13 +114,20 @@ def _run_at(test_path: Path, ref: str, expectation: str, *, repo_root: Path) -> 
     )
 
 
-def run_gate(test_path: Path, *, good_ref: str, bad_ref: str, repo_root: Path) -> GateResult:
+def run_gate(
+    test_path: Path,
+    *,
+    good_ref: str,
+    bad_ref: str,
+    repo_root: Path,
+    seed: Path | None = None,
+) -> GateResult:
     """Run the test at both commits and report whether it discriminates.
 
     The bad commit is tried first. A candidate that cannot detect the regression
     is the common failure, and finding that out early saves a sandbox build.
     """
-    at_bad = _run_at(test_path, bad_ref, "fail", repo_root=repo_root)
+    at_bad = _run_at(test_path, bad_ref, "fail", repo_root=repo_root, seed=seed)
     if not at_bad.satisfied:
         # Still record a good-side result so the report is complete, but do not
         # spend a second sandbox on a candidate that has already lost.
@@ -120,5 +137,5 @@ def run_gate(test_path: Path, *, good_ref: str, bad_ref: str, repo_root: Path) -
             at_good=GateRun(ref=good_ref, expectation="pass", exit_code=NOT_RUN, stdout_tail=""),
         )
 
-    at_good = _run_at(test_path, good_ref, "pass", repo_root=repo_root)
+    at_good = _run_at(test_path, good_ref, "pass", repo_root=repo_root, seed=seed)
     return GateResult(test_path=test_path, at_bad=at_bad, at_good=at_good)

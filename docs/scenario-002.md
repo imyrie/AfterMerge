@@ -107,12 +107,29 @@ critical regression detected
 
 ---
 
-## One limitation worth recording
+## The limitation this exposed, and how it was resolved
 
-The reproducer seeds sandboxes from a fixed, deliberately small dataset, so that both sides of a
-differential see identical data. That makes it **structurally unable to reproduce a regression whose
+The reproducer seeded every sandbox from one fixed, deliberately small dataset so that both sides of
+a differential saw identical data. That made it **structurally unable to reproduce a regression whose
 severity depends on data volume**: replayed against 8,000 rows, this cast costs almost nothing.
 
-Slice 2's determinism guarantee and the ability to reproduce volume-dependent faults are in direct
-tension. Resolving it means per-scenario seeds, which is a real change to the sandbox contract rather
-than a tweak.
+The tension was never between determinism and volume -- it was that *one* dataset was serving two
+different jobs. Sandboxes now take a **seed parameter**, defaulting to the small dataset:
+
+```
+aftermerge replay --seed large
+aftermerge certify --seed large
+aftermerge fix --seed large
+```
+
+Determinism is preserved by construction rather than by discipline. The seed is a **single argument**
+to a comparison, not one per side, so a differential cannot be run across two different datasets --
+there is no way to express it. `infra/sandbox/seed-large.sql` keeps the same `setseed()` and fixed
+epoch as the small one; the only thing that changes is how many rows there are.
+
+Each measurement now records which dataset produced it, on `Sandbox.seed`, `ReplayMeasurement.seed`
+and in the validation payload. "2 operations per request" means something different over 8,000 rows
+than over 400,000, and a measurement that does not say which is not reproducible.
+
+Scenario files declare what they need (`sandbox.seed: large` here, `default` for the N+1, which
+multiplies round trips and so reproduces at any volume).

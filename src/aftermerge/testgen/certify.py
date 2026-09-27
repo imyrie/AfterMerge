@@ -14,6 +14,7 @@ say it could not.
 
 from __future__ import annotations
 
+import functools
 import json
 import subprocess
 import sys
@@ -74,7 +75,7 @@ class CertifyResult:
 
 
 def _default_runner(
-    test_path: Path, context: TestContext, repo_root: Path
+    test_path: Path, context: TestContext, repo_root: Path, *, seed: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -88,6 +89,7 @@ def _default_runner(
             context.baseline_version,
             "--bad",
             context.candidate_version,
+            *(["--seed", seed] if seed else []),
             "--json",
         ],
         cwd=repo_root,
@@ -103,16 +105,22 @@ def certify(
     *,
     repo_root: Path,
     max_attempts: int = 3,
-    runner: GateRunner = _default_runner,
+    seed: str | None = None,
+    runner: GateRunner | None = None,
 ) -> CertifyResult:
     """Produce a gated regression test, or honestly report that none was found."""
     # Retrying a deterministic generator burns two sandbox builds to get the same
     # file back, so only a non-deterministic one is worth a second attempt.
+    # Injected runners are used verbatim; the default one needs the seed bound in.
+    runner = runner or functools.partial(_default_runner, seed=seed)
     allowed = 1 if getattr(generator, "deterministic", False) else max_attempts
 
     attempts: list[Attempt] = []
+    feedback: str | None = None
     for _ in range(allowed):
-        candidate = generator.generate(context)
+        # A retry with an unchanged prompt re-rolls the same dice; the previous
+        # gate's reasons are exactly what a second attempt needs to know.
+        candidate = generator.generate(context, feedback)
         path = write(candidate, repo_root=repo_root)
         process = runner(path, context, repo_root)
 
@@ -126,6 +134,9 @@ def certify(
 
         if attempt.passed:
             return CertifyResult(attempts=tuple(attempts), accepted=attempt, test_path=path)
+
+        reasons = payload.get("reasons") or [attempt.summary]
+        feedback = "\n".join(f"- {r}" for r in reasons)
 
         # A rejected candidate must not survive on disk. An ungated test sitting
         # in tests/regression/ is exactly the false assurance this design exists

@@ -45,7 +45,7 @@ class TestGenerator(Protocol):
     #: builds and produce the identical file.
     deterministic: bool
 
-    def generate(self, context: TestContext) -> TestCandidate: ...
+    def generate(self, context: TestContext, feedback: str | None = None) -> TestCandidate: ...
 
 
 def _header(context: TestContext) -> str:
@@ -150,7 +150,10 @@ class TemplateGenerator:
     name = "template"
     deterministic = True
 
-    def generate(self, context: TestContext) -> TestCandidate:
+    def generate(self, context: TestContext, feedback: str | None = None) -> TestCandidate:
+        # Deterministic: feedback cannot change the output, so it is ignored
+        # rather than quietly pretended to matter.
+        del feedback
         size = context.size_parameter
 
         if size is not None:
@@ -206,6 +209,11 @@ Measured database operations per request:
 
 Files changed by the candidate deploy: {changed_files}
 
+The module must begin with exactly these two imports, and no others:
+
+    from aftermerge.reproducer.envelope import RequestEnvelope
+    from aftermerge.reproducer.replay import replay
+
 Requirements:
 - Exactly one test function named {test_name}, taking the `sandbox_under_test` fixture.
 - Use `replay(sandbox_under_test, RequestEnvelope.get(path, **params), repeat=5)`, which
@@ -217,6 +225,14 @@ Requirements:
 - Include a failure message naming both measurements.
 
 Return only the Python module source, with no markdown fences and no commentary.
+"""
+
+RETRY_PREAMBLE = """\
+A previous attempt at this test was REJECTED. Do not repeat the same approach.
+
+Why it was rejected:
+{feedback}
+
 """
 
 
@@ -231,7 +247,7 @@ class AnthropicGenerator:
         self._model = model
         self._max_tokens = max_tokens
 
-    def generate(self, context: TestContext) -> TestCandidate:
+    def generate(self, context: TestContext, feedback: str | None = None) -> TestCandidate:
         prompt = PROMPT.format(
             service=context.service,
             route=context.route,
@@ -246,6 +262,9 @@ class AnthropicGenerator:
             changed_files=", ".join(context.changed_files) or "none recorded",
             test_name=context.test_name,
         )
+        if feedback:
+            # Retrying with an unchanged prompt just re-rolls the same dice.
+            prompt = RETRY_PREAMBLE.format(feedback=feedback) + prompt
         response = self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,

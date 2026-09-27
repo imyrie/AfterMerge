@@ -38,5 +38,10 @@ def sandbox_under_test():
     ref = os.environ.get("AFTERMERGE_TEST_REF")
     if not ref:
         pytest.skip("set AFTERMERGE_TEST_REF to the commit under test")
-    with sandbox(ref, repo_root=ROOT) as running:
+    # A regression whose severity depends on table size only reproduces against
+    # the dataset it was measured on, so the gate passes the seed alongside the
+    # commit and both of its runs get the same one.
+    raw_seed = os.environ.get("AFTERMERGE_TEST_SEED")
+    seed = Path(raw_seed) if raw_seed else None
+    with sandbox(ref, repo_root=ROOT, seed=seed) as running:
         yield running

@@ -86,7 +86,7 @@ class _FakeClient:
 
 def test_llm_output_has_fences_stripped() -> None:
     client = _FakeClient("```python\nx = 1\n```")
-    proposal = AnthropicProposer(client).propose(CTX)
+    proposal = AnthropicProposer(client, repo_root=ROOT).propose(CTX)
     assert proposal.files[TARGET] == "x = 1\n"
     assert proposal.strategy == "repair"
 
@@ -94,7 +94,7 @@ def test_llm_output_has_fences_stripped() -> None:
 def test_the_prompt_states_the_equivalence_requirement() -> None:
     """The model must know that returning fewer rows will be rejected."""
     client = _FakeClient("x = 1\n")
-    AnthropicProposer(client).propose(CTX)
+    AnthropicProposer(client, repo_root=ROOT).propose(CTX)
     prompt = client.messages.last_prompt or ""
 
     assert "byte-identical" in prompt

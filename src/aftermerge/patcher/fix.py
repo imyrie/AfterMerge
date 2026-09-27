@@ -11,6 +11,7 @@ a plausible diff nobody checked.
 
 from __future__ import annotations
 
+import functools
 import json
 import subprocess
 import sys
@@ -68,7 +69,7 @@ class FixResult:
 
 
 def _default_runner(
-    patch_path: Path, patch: Patch, repo_root: Path
+    patch_path: Path, patch: Patch, repo_root: Path, *, seed: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -82,6 +83,7 @@ def _default_runner(
             patch.strategy,
             "--origin",
             patch.origin,
+            *(["--seed", seed] if seed else []),
             "--json",
         ],
         cwd=repo_root,
@@ -97,11 +99,13 @@ def propose_fix(
     *,
     repo_root: Path,
     max_attempts: int = 3,
-    runner: ValidateRunner = _default_runner,
+    seed: str | None = None,
+    runner: ValidateRunner | None = None,
 ) -> FixResult:
     """Produce a validated fix, or honestly report that none was found."""
     # Retrying a deterministic proposer regenerates the same diff at the cost of
     # three sandbox builds, so only a non-deterministic one gets further goes.
+    runner = runner or functools.partial(_default_runner, seed=seed)
     allowed = 1 if getattr(proposer, "deterministic", False) else max_attempts
 
     target_dir = repo_root / CANDIDATE_DIR
@@ -109,8 +113,9 @@ def propose_fix(
     patch_path = target_dir / CANDIDATE_NAME
 
     attempts: list[FixAttempt] = []
+    feedback: str | None = None
     for _ in range(allowed):
-        proposal = proposer.propose(context)
+        proposal = proposer.propose(context, feedback)
         try:
             patch = to_patch(proposal, base_ref=context.bad_ref, repo_root=repo_root)
         except PatchRejected as exc:
@@ -139,6 +144,14 @@ def propose_fix(
 
         if attempt.accepted:
             return FixResult(attempts=tuple(attempts), accepted=attempt, patch_path=patch_path)
+
+        # Only the checks that actually failed; passing ones are not feedback.
+        failed = [
+            f"{c['name']}: {c['detail']}"
+            for c in payload.get("checks", [])
+            if c.get("status") == "failed"
+        ]
+        feedback = "\n".join(f"- {r}" for r in failed) or attempt.summary
 
         patch_path.unlink(missing_ok=True)
 

@@ -28,6 +28,9 @@ class ReplayMeasurement:
     db_spans_per_request: float
     code_site: str | None
     trace_database: str
+    #: The dataset this was measured against. "2 operations per request" means
+    #: something different over 8,000 rows than over 400,000.
+    seed: str = "seed.sql"
 
     @property
     def clean(self) -> bool:
@@ -100,4 +103,5 @@ def replay(
         db_spans_per_request=total,
         code_site=top_site,
         trace_database=sandbox.trace_database,
+        seed=sandbox.seed,
     )

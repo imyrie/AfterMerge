@@ -44,9 +44,11 @@ class _Counting:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.last_feedback: str | None = None
 
-    def generate(self, context: TestContext) -> TestCandidate:
+    def generate(self, context: TestContext, feedback: str | None = None) -> TestCandidate:
         self.calls += 1
+        self.last_feedback = feedback
         return TestCandidate(
             module_name=f"test_attempt_{self.calls}",
             source="def test_x():\n    assert True\n",
@@ -121,3 +123,29 @@ def test_unparseable_gate_output_does_not_crash(tmp_path) -> None:
 
     assert not outcome.succeeded
     assert outcome.attempts[0].payload["parse_error"] is True
+
+
+def test_the_seed_actually_reaches_the_gate_command(tmp_path) -> None:
+    """Same silent-drop guard as the fix loop's."""
+    from aftermerge.testgen import certify as certify_mod
+    from aftermerge.testgen.certify import _default_runner
+
+    captured: list[list[str]] = []
+
+    class _Recorder:
+        def __call__(self, args, **kwargs):
+            captured.append(args)
+            import subprocess as sp
+
+            return sp.CompletedProcess(args=args, returncode=0, stdout="{}", stderr="")
+
+    original = certify_mod.subprocess.run
+    certify_mod.subprocess.run = _Recorder()  # type: ignore[assignment]
+    try:
+        _default_runner(tmp_path / "t.py", CTX, tmp_path, seed="large")
+        _default_runner(tmp_path / "t.py", CTX, tmp_path)
+    finally:
+        certify_mod.subprocess.run = original  # type: ignore[assignment]
+
+    assert "--seed" in captured[0] and "large" in captured[0]
+    assert "--seed" not in captured[1]

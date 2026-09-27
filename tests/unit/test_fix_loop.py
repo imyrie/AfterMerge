@@ -33,9 +33,11 @@ class _StubProposer:
     def __init__(self, deterministic: bool) -> None:
         self.deterministic = deterministic
         self.calls = 0
+        self.last_feedback: str | None = None
 
-    def propose(self, context: PatchContext) -> Proposal:
+    def propose(self, context: PatchContext, feedback: str | None = None) -> Proposal:
         self.calls += 1
+        self.last_feedback = feedback
         return Proposal(files={"x": "y"}, strategy="repair", origin=self.name)
 
 
@@ -136,3 +138,37 @@ def test_an_unusable_proposal_counts_as_a_failed_attempt(tmp_path, monkeypatch) 
     assert not outcome.succeeded
     assert len(outcome.attempts) == 2
     assert "identical" in outcome.attempts[0].summary
+
+
+def test_the_seed_actually_reaches_the_validate_command(tmp_path) -> None:
+    """Guards a silent failure: a seed accepted, bound, and then dropped.
+
+    Nothing else catches this. The signature type-checks, the partial binds, and
+    a missing element in an argument list is invisible to mypy -- validation
+    would run against the default dataset while reporting the requested one.
+    """
+    from aftermerge.patcher.fix import _default_runner
+    from aftermerge.patcher.patch import Patch
+
+    patch = Patch(diff=DIFF, strategy="revert", origin="test")
+    captured: list[list[str]] = []
+
+    class _Recorder:
+        def __call__(self, args, **kwargs):
+            captured.append(args)
+            import subprocess as sp
+
+            return sp.CompletedProcess(args=args, returncode=0, stdout="{}", stderr="")
+
+    import aftermerge.patcher.fix as fix_mod
+
+    original = fix_mod.subprocess.run
+    fix_mod.subprocess.run = _Recorder()  # type: ignore[assignment]
+    try:
+        _default_runner(tmp_path / "c.patch", patch, tmp_path, seed="large")
+        _default_runner(tmp_path / "c.patch", patch, tmp_path)
+    finally:
+        fix_mod.subprocess.run = original  # type: ignore[assignment]
+
+    assert "--seed" in captured[0] and "large" in captured[0]
+    assert "--seed" not in captured[1]

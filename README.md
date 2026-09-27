@@ -67,6 +67,29 @@ cbb4790          2.0           12.3     156.4     770.0
 8b4fd77         51.0           40.1    1753.1    7516.3
 ```
 
+### Model-backed generation (optional)
+
+Test and patch generation each have two implementations behind one interface. The deterministic ones
+are the default and need no credentials; the model-backed ones need a key:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...      # optional; AFTERMERGE_MODEL overrides the model
+aftermerge certify --generator anthropic  # model writes the regression test
+aftermerge fix --proposer anthropic       # model writes the patch
+```
+
+Nothing about the trust model changes. A model-written test is still accepted only if it fails on the
+broken commit and passes on the fixed one; a model-written patch is still rejected unless it restores
+the measured behaviour *and* returns byte-identical responses. The model proposes; the gates decide.
+
+A rejected candidate's reasons are fed back into the next attempt, so a retry is informed rather than
+a re-roll. Deterministic generators ignore that feedback and are never retried, since their output
+cannot change.
+
+Without a key, `--generator anthropic` fails with a clear message rather than quietly falling back to
+the template -- every candidate records what produced it, and a silent substitution would make that
+provenance a lie.
+
 ### Other targets
 
 | command | does |
@@ -79,6 +102,7 @@ cbb4790          2.0           12.3     156.4     770.0
 | `uv run aftermerge incidents` | list detected incidents and their evidence |
 | `uv run aftermerge capture` | reconstruct replayable requests from the regressed version |
 | `uv run aftermerge replay` | differential replay across two commits (exit 0 = reproduced) |
+| `--seed default\|large` | sandbox dataset; volume-dependent faults need `large` (see scenarios) |
 | `uv run aftermerge verify` | run the replay and record its outcome as level-3 evidence |
 | `uv run aftermerge testgen` | write a regression test encoding the measured behaviour |
 | `uv run aftermerge certify` | generate a test and keep it only if it passes the gate |

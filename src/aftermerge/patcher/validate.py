@@ -55,6 +55,7 @@ class ValidationResult:
     patched_sha: str
     strategy: str
     checks: tuple[Check, ...]
+    seed: str = "seed.sql"
 
     @property
     def passed(self) -> bool:
@@ -73,6 +74,7 @@ class ValidationResult:
         return {
             "patched_sha": self.patched_sha,
             "strategy": self.strategy,
+            "seed": self.seed,
             "passed": self.passed,
             "checks": [
                 {"name": c.name, "status": c.status, "detail": c.detail} for c in self.checks
@@ -94,13 +96,14 @@ def _pytest(
     )
 
 
-def _check_regression_test(test_path: Path, patched_sha: str, repo_root: Path) -> Check:
+def _check_regression_test(
+    test_path: Path, patched_sha: str, repo_root: Path, *, seed: Path | None = None
+) -> Check:
     """The test that failed on the bad commit must now pass."""
-    process = _pytest(
-        ["-m", "slow", "-q", str(test_path)],
-        cwd=repo_root,
-        env={"AFTERMERGE_TEST_REF": patched_sha},
-    )
+    env = {"AFTERMERGE_TEST_REF": patched_sha}
+    if seed is not None:
+        env["AFTERMERGE_TEST_SEED"] = str(seed)
+    process = _pytest(["-m", "slow", "-q", str(test_path)], cwd=repo_root, env=env)
     if process.returncode == 0:
         return Check("patch_regression_test", "passed", f"{test_path.name} passes at {patched_sha}")
     if process.returncode == PYTEST_TESTS_FAILED:
@@ -145,6 +148,7 @@ def validate(
     normalisations: tuple[str, ...] = (),
     suite_command: list[str] | None = None,
     repeat: int = 10,
+    seed: Path | None = None,
 ) -> ValidationResult:
     """Apply a patch, then establish that it fixes the fault and changes nothing else."""
     # Cheap guards first. Neither needs a container, and both are disqualifying.
@@ -153,15 +157,15 @@ def validate(
 
     with patched_commit(patch, base_ref=bad_ref, repo_root=repo_root) as patched_sha:
         checks: list[Check] = [
-            _check_regression_test(test_path, patched_sha, repo_root),
+            _check_regression_test(test_path, patched_sha, repo_root, seed=seed),
             _check_suite(suite_command, repo_root),
         ]
 
-        with sandbox(good_ref, repo_root=repo_root) as good_box:
+        with sandbox(good_ref, repo_root=repo_root, seed=seed) as good_box:
             good_work = replay(good_box, envelope, repeat=repeat)
             good_response = snapshot(good_box, envelope)
 
-        with sandbox(patched_sha, repo_root=repo_root) as patched_box:
+        with sandbox(patched_sha, repo_root=repo_root, seed=seed) as patched_box:
             patched_work = replay(patched_box, envelope, repeat=repeat)
             patched_response = snapshot(patched_box, envelope)
 
@@ -197,5 +201,8 @@ def validate(
         )
 
         return ValidationResult(
-            patched_sha=patched_sha, strategy=patch.strategy, checks=tuple(checks)
+            patched_sha=patched_sha,
+            strategy=patch.strategy,
+            checks=tuple(checks),
+            seed=good_box.seed,
         )
