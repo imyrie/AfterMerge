@@ -45,7 +45,12 @@ services:
       # Runs only when the volume is empty. `make reset` to re-seed.
       - ./fixtures/shopdemo/db:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aftermerge -d shopdemo"]
+      # -h 127.0.0.1 is load-bearing. During initdb Postgres runs a temporary
+      # server on the unix socket only, so a socket-based pg_isready reports
+      # healthy while the seed is still loading -- the app then starts against an
+      # empty database and every request 500s. Small seeds finish fast enough to
+      # hide this; a 400k-row seed does not.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U aftermerge -d shopdemo"]
       interval: 5s
       timeout: 3s
       retries: 20
