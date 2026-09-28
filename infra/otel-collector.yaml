@@ -17,6 +17,18 @@ processors:
     send_batch_size: 1024
 
 exporters:
+  # Spans fan out to both sinks. ClickHouse remains the durable store that every
+  # batch query reads; Kafka carries the same spans to a consumer that can react
+  # while a rollout is still happening, rather than after it.
+  kafka:
+    brokers: [kafka:9092]
+    topic: otel-spans
+    # JSON rather than the default protobuf so the consumer needs no generated
+    # stubs, and so a human can read a message off the topic while debugging.
+    encoding: otlp_json
+    producer:
+      compression: none
+
   clickhouse:
     endpoint: tcp://clickhouse:9000?dial_timeout=10s&compress=lz4
     database: otel
@@ -48,7 +60,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [clickhouse, debug]
+      exporters: [clickhouse, kafka, debug]
   telemetry:
     logs:
       level: info

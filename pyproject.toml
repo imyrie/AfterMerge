@@ -16,6 +16,7 @@ dependencies = [
     "httpx>=0.28",
     "anthropic>=0.40",
     "python-dotenv>=1.0",
+    "confluent-kafka>=2.6",
 ]
 
 [project.scripts]

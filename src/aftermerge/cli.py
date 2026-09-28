@@ -62,6 +62,13 @@ from aftermerge.store.repositories import (
     IncidentRepository,
     VerificationRepository,
 )
+from aftermerge.streaming.consumer import (
+    DEFAULT_GROUP,
+    DEFAULT_TOPIC,
+    build_consumer,
+    consume,
+)
+from aftermerge.streaming.windows import StreamState
 from aftermerge.telemetry import catalog, client
 from aftermerge.testgen import context as testgen_context
 from aftermerge.testgen.certify import certify as certify_test
@@ -1364,6 +1371,70 @@ def warehouse_benchmark(
         console.print(f"\n[{colour}]{state}[/{colour}]")
 
     raise typer.Exit(code=0 if benchmark.all_equivalent else 1)
+
+
+@app.command()
+def stream(
+    service: str = typer.Option("orders", help="Service whose database work to watch."),
+    route_service: str = typer.Option("gateway", help="Service serving the route."),
+    route: str = typer.Option("GET /orders", help="Server span name for the route."),
+    p95_slo_ms: float = typer.Option(500.0, help="Latency objective for the route."),
+    topic: str = typer.Option(DEFAULT_TOPIC, help="Kafka topic carrying spans."),
+    group: str = typer.Option(DEFAULT_GROUP, help="Consumer group id."),
+    from_beginning: bool = typer.Option(False, help="Replay the topic from the start."),
+    min_samples: int = typer.Option(30, help="Samples per side before comparing."),
+    evaluate_every: int = typer.Option(200, help="Spans between evaluations."),
+    max_spans: int | None = typer.Option(None, help="Stop after this many spans."),
+    idle_timeout: float | None = typer.Option(
+        None, help="Stop after this many seconds with no messages. Needed to replay a topic."
+    ),
+) -> None:
+    """Watch spans arrive and reach a verdict during the rollout.
+
+    The same rules the batch detector uses, applied to rolling windows instead of
+    a completed deploy. It is an early signal on thin evidence, not a replacement
+    for `aftermerge detect`, which remains what opens an incident.
+    """
+    state = StreamState(service=service, route_service=route_service, route=route)
+    slo = SLO(route=route, p95_ms=p95_slo_ms)
+
+    console.print(
+        f"consuming [bold]{topic}[/bold] as {group}; "
+        f"watching {route_service} {route} and {service} database work"
+    )
+    console.print("[dim]ctrl-c to stop[/dim]\n")
+
+    try:
+        consumer = build_consumer(group, from_beginning=from_beginning)
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        console.print(f"[yellow]cannot reach Kafka:[/yellow] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    triggered = False
+    try:
+        for verdict in consume(
+            state,
+            slo,
+            consumer=consumer,
+            topic=topic,
+            min_samples=min_samples,
+            evaluate_every=evaluate_every,
+            max_messages=max_spans,
+            idle_timeout=idle_timeout,
+        ):
+            detection = verdict.detection
+            colour = "red" if detection.triggered else "green"
+            console.print(
+                f"[{colour}]{detection.headline}[/{colour}] "
+                f"({verdict.baseline} -> {verdict.candidate}, {verdict.spans_seen:,} spans)"
+            )
+            for reason in detection.reasons:
+                console.print(f"  - {reason}")
+            triggered = triggered or detection.triggered
+    except KeyboardInterrupt:
+        console.print("\n[dim]stopped[/dim]")
+
+    raise typer.Exit(code=1 if triggered else 0)
 
 
 if __name__ == "__main__":

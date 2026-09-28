@@ -1,4 +1,4 @@
-.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr evaluate dq rollup
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr evaluate dq rollup stream
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
@@ -50,6 +50,10 @@ facts:
 rollup:
 	uv run aftermerge warehouse apply
 	uv run aftermerge warehouse benchmark
+
+## Follow spans on Kafka and report a verdict during the rollout
+stream:
+	uv run aftermerge stream
 
 ## Check data quality before drawing conclusions from the data
 dq:
