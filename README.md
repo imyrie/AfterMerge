@@ -1,5 +1,7 @@
 # AfterMerge
 
+[![CI](https://github.com/imyrie/AfterMerge/actions/workflows/ci.yml/badge.svg)](https://github.com/imyrie/AfterMerge/actions/workflows/ci.yml)
+
 Closed-loop production regression pipeline: **detect → investigate → reproduce → test → patch → verify → PR.**
 
 The loop is complete:
@@ -125,6 +127,15 @@ as a target name):
 ```bash
 uv run python scripts/verify_span.py <trace_id>
 ```
+
+## Continuous integration
+
+Every push and pull request runs lint, format check and mypy, then the test suite with a PostgreSQL
+service so the audit-trail integration tests execute rather than skip.
+
+The `slow` marker stays out of CI. Those tests drive Docker Compose projects and reach a ClickHouse
+container by name -- a local developer topology rather than something a runner provides. Run them
+locally with `make test-all`.
 
 ## Layout
 
