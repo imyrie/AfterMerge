@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import time
@@ -13,6 +14,12 @@ from rich.console import Console
 from rich.table import Table
 
 from aftermerge import llm
+from aftermerge.dataquality.runner import (
+    DEFAULT_LOOKBACK_MINUTES,
+    DEFAULT_MAX_STALENESS_MINUTES,
+    QUERIES_DIR,
+    run_all,
+)
 from aftermerge.detector import service as detector_service
 from aftermerge.detector import windows
 from aftermerge.detector.rules import SLO
@@ -1206,6 +1213,65 @@ def evaluate(
     if out is not None:
         out.write_text(json.dumps(report.as_dict(), indent=2))
         console.print(f"\nwrote {out}")
+
+
+@app.command()
+def dq(
+    lookback_minutes: int = typer.Option(DEFAULT_LOOKBACK_MINUTES, help="Analysis window."),
+    max_staleness_minutes: int = typer.Option(
+        DEFAULT_MAX_STALENESS_MINUTES, help="How old the newest span may be."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
+) -> None:
+    """Check the data before anything draws conclusions from it.
+
+    Exits 0 when the data is trustworthy, 1 when a check fails, 2 when no check
+    could produce evidence. A failing check should block downstream analysis: a
+    wrong number that looks plausible is worse than a missing one.
+    """
+    try:
+        ch: object | None = client.get_client()
+    except Exception:
+        ch = None
+
+    session_cm = None
+    session: object | None = None
+    try:
+        engine = store_db.get_engine()
+        session_cm = store_db.session_scope(engine)
+        session = session_cm.__enter__()
+    except Exception:
+        session_cm, session = None, None
+
+    try:
+        report = run_all(
+            ch=ch,
+            session=session,
+            queries_dir=Path(QUERIES_DIR),
+            lookback_minutes=lookback_minutes,
+            max_staleness_minutes=max_staleness_minutes,
+        )
+    finally:
+        if session_cm is not None:
+            with contextlib.suppress(Exception):
+                session_cm.__exit__(None, None, None)
+
+    if as_json:
+        console.print_json(json.dumps(report.as_dict()))
+    else:
+        table = Table(title="data quality", title_justify="left", header_style="bold")
+        for column in ("check", "status", "detail"):
+            table.add_column(column, overflow="fold")
+        for result in report.results:
+            colour = {"passed": "green", "failed": "red", "skipped": "yellow"}[result.status]
+            table.add_row(result.name, f"[{colour}]{result.status}[/{colour}]", result.detail)
+        console.print(table)
+        colour = "green" if report.passed else "red"
+        console.print(f"\n[{colour}]{report.summary}[/{colour}]")
+
+    if report.passed:
+        raise typer.Exit(code=0)
+    raise typer.Exit(code=1 if report.failures else 2)
 
 
 if __name__ == "__main__":
