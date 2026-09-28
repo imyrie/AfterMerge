@@ -1,4 +1,4 @@
-.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr evaluate dq
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr evaluate dq rollup
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
@@ -45,6 +45,11 @@ dance:
 
 facts:
 	uv run aftermerge facts
+
+## Create warehouse rollups and verify they agree with raw
+rollup:
+	uv run aftermerge warehouse apply
+	uv run aftermerge warehouse benchmark
 
 ## Check data quality before drawing conclusions from the data
 dq:

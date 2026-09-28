@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import clickhouse_connect
@@ -19,6 +19,9 @@ class FactResult:
     params: dict[str, Any]
     columns: list[str]
     rows: list[tuple[Any, ...]]
+    #: ClickHouse's own profiling for the statement: read_rows, read_bytes,
+    #: elapsed_ns. Carried so cost can be measured without re-running anything.
+    summary: dict[str, str] = field(default_factory=dict)
 
     def __bool__(self) -> bool:
         return bool(self.rows)
@@ -47,4 +50,5 @@ def run(name: str, client: Any | None = None, **params: Any) -> FactResult:
         params=params,
         columns=list(result.column_names),
         rows=[tuple(r) for r in result.result_rows],
+        summary=dict(result.summary or {}),
     )

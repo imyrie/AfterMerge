@@ -68,6 +68,7 @@ from aftermerge.testgen.certify import certify as certify_test
 from aftermerge.testgen.gate import run_gate
 from aftermerge.testgen.generator import AnthropicGenerator, TemplateGenerator
 from aftermerge.testgen.writer import write as write_candidate
+from aftermerge.warehouse import rollup as rollup_mod
 
 # Read .env before any command touches os.environ. `.env.example` has documented
 # ANTHROPIC_API_KEY since the model-backed paths landed, but nothing loaded the
@@ -1272,6 +1273,91 @@ def dq(
     if report.passed:
         raise typer.Exit(code=0)
     raise typer.Exit(code=1 if report.failures else 2)
+
+
+warehouse_app = typer.Typer(help="Manage the telemetry warehouse.", no_args_is_help=True)
+app.add_typer(warehouse_app, name="warehouse")
+
+
+@warehouse_app.command("apply")
+def warehouse_apply(
+    backfill: bool = typer.Option(True, help="Rebuild rollups from existing raw spans."),
+) -> None:
+    """Create the rollup tables and materialised views, and fill in history.
+
+    Materialised views only see new inserts, so without the backfill the rollups
+    would answer correctly about the future and wrongly about the past.
+    """
+    ch = client.get_client()
+    applied = rollup_mod.apply(ch)
+    console.print(f"applied {applied} statement(s)")
+
+    if backfill:
+        counts = rollup_mod.backfill(ch)
+        for table, rows in counts.items():
+            console.print(f"  {table}: {rows:,} rows")
+    raw = ch.query("SELECT count() FROM otel_traces").result_rows[0][0]
+    console.print(f"\nraw otel_traces: {int(raw):,} rows")
+
+
+@warehouse_app.command("benchmark")
+def warehouse_benchmark(
+    service: str = typer.Option("orders", help="Service for the db-work question."),
+    route_service: str = typer.Option("gateway", help="Service for the latency question."),
+    route: str = typer.Option("GET /orders", help="Route for the latency question."),
+    days: int = typer.Option(7, help="Window, in days."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
+) -> None:
+    """Compare rollup-backed queries against raw, on answer and on cost.
+
+    Equivalence is checked first. A rollup that is fast and wrong is worse than
+    no rollup, so a speedup is only reported for questions that agree.
+    """
+    ch = client.get_client()
+    minutes = days * 24 * 60
+    params = {
+        "route latency": (
+            {"service": route_service, "route": route, "lookback_minutes": minutes},
+            {"service": route_service, "route": route, "lookback_days": days},
+        ),
+        "db work per request": (
+            {"service": service, "lookback_minutes": minutes},
+            {"service": service, "lookback_days": days},
+        ),
+    }
+
+    comparisons = []
+    for question, raw_name, rollup_name in rollup_mod.EQUIVALENTS:
+        raw_params, rollup_params = params[question]
+        comparisons.append(
+            rollup_mod.compare(ch, question, raw_name, raw_params, rollup_name, rollup_params)
+        )
+    benchmark = rollup_mod.RollupBenchmark(comparisons=tuple(comparisons))
+
+    if as_json:
+        console.print_json(json.dumps(benchmark.as_dict()))
+    else:
+        table = Table(title="rollup vs raw", title_justify="left", header_style="bold")
+        for column in ("question", "agrees", "rows read", "bytes read", "ms", "speedup"):
+            table.add_column(column, no_wrap=True)
+        for c in comparisons:
+            table.add_row(
+                c.question,
+                "yes" if c.equivalent else "NO",
+                f"{c.raw.rows_read:,} -> {c.rollup.rows_read:,}",
+                f"{c.raw.bytes_read:,} -> {c.rollup.bytes_read:,}",
+                f"{c.raw.elapsed_ms:.0f} -> {c.rollup.elapsed_ms:.0f}",
+                f"{c.speedup:.1f}x",
+            )
+        console.print(table)
+        for c in comparisons:
+            if not c.equivalent:
+                console.print(f"[red]{c.question} disagrees:[/red] {c.detail}")
+        colour = "green" if benchmark.all_equivalent else "red"
+        state = "all questions agree" if benchmark.all_equivalent else "ROLLUP DISAGREES WITH RAW"
+        console.print(f"\n[{colour}]{state}[/{colour}]")
+
+    raise typer.Exit(code=0 if benchmark.all_equivalent else 1)
 
 
 if __name__ == "__main__":
