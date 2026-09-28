@@ -1282,13 +1282,16 @@ app.add_typer(warehouse_app, name="warehouse")
 @warehouse_app.command("apply")
 def warehouse_apply(
     backfill: bool = typer.Option(True, help="Rebuild rollups from existing raw spans."),
+    database: str | None = typer.Option(
+        None, help="Target database. Defaults to the configured one."
+    ),
 ) -> None:
     """Create the rollup tables and materialised views, and fill in history.
 
     Materialised views only see new inserts, so without the backfill the rollups
     would answer correctly about the future and wrongly about the past.
     """
-    ch = client.get_client()
+    ch = client.get_client(database)
     applied = rollup_mod.apply(ch)
     console.print(f"applied {applied} statement(s)")
 
@@ -1306,6 +1309,9 @@ def warehouse_benchmark(
     route_service: str = typer.Option("gateway", help="Service for the latency question."),
     route: str = typer.Option("GET /orders", help="Route for the latency question."),
     days: int = typer.Option(7, help="Window, in days."),
+    database: str | None = typer.Option(
+        None, help="Target database. Defaults to the configured one."
+    ),
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
 ) -> None:
     """Compare rollup-backed queries against raw, on answer and on cost.
@@ -1313,7 +1319,7 @@ def warehouse_benchmark(
     Equivalence is checked first. A rollup that is fast and wrong is worse than
     no rollup, so a speedup is only reported for questions that agree.
     """
-    ch = client.get_client()
+    ch = client.get_client(database)
     minutes = days * 24 * 60
     params = {
         "route latency": (

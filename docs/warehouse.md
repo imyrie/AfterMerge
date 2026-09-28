@@ -22,18 +22,43 @@ daily buckets combinable: `quantilesMerge` reconstructs a correct overall p95, w
 per-day p95 values would be wrong. `uniqExactMerge` likewise keeps distinct trace counts exact
 instead of summing and double counting traces that span a day boundary.
 
-## Measured, 2026-09-28
+## Measured
 
-57,732 raw spans. Best of three runs, and equivalence checked before any speedup is reported.
+### At retention scale
 
-| question | rows read | bytes read | elapsed | agrees |
-|---|---|---|---|---|
-| route latency | 8,198 → 9 | 708 KB → 1.6 KB | 29ms → 21ms | yes |
-| db work per request | 57,726 → 4 | 23.6 MB → 1.1 KB | 78ms → 10ms | yes |
+392,457 spans over 10 days. Best of three runs, equivalence checked before any speedup is reported.
 
-**Bytes read is the honest headline.** At this data volume elapsed time is dominated by fixed
-per-query overhead, so the 8x is understated; the 22,000x reduction in bytes scanned is what actually
-changes as the table grows.
+| question | rows read | bytes read | elapsed |
+|---|---|---|---|
+| route latency | 32,870 -> 41 (802x) | 5.8 MB -> 6.9 KB (840x) | 74.5ms -> 5.9ms (12.7x) |
+| db work per request | 367,779 -> 17 (21,634x) | 159.9 MB -> 4.3 KB (37,418x) | 101.3ms -> 7.9ms (12.8x) |
+
+### On a single afternoon of real traffic
+
+57,732 spans over 2 days, for comparison:
+
+| question | rows read | bytes read | elapsed |
+|---|---|---|---|
+| route latency | 8,198 -> 9 | 708 KB -> 1.6 KB | 29ms -> 21ms |
+| db work per request | 57,726 -> 4 | 23.6 MB -> 1.1 KB | 78ms -> 10ms |
+
+**The comparison between those two tables is the actual point.** The rollup's answer stayed the same
+size while the raw scan grew with retention, so the gap widens with every day kept. Elapsed time at
+the smaller volume is mostly fixed per-query overhead, which is why the 2-day speedup understates the
+technique; bytes read is the honest measure at any scale.
+
+### How the retention-scale data was produced
+
+`scripts/generate_benchmark_data.py` clones real spans across a span of days, giving each copy a
+fresh trace id so distinct-count aggregates stay meaningful. It is **a retention simulation, not
+recorded traffic** -- same schema, same attribute payloads, same distribution, more history than a
+laptop accumulates in an afternoon. It writes to a separate database, so the `otel` data the pipeline
+uses is never touched.
+
+The target was 30 days; ClickHouse stopped at 10. Reading the wide `SpanAttributes` map repeatedly
+pushes its memory tracker past the container's 3.44 GiB ceiling, and capping block size and thread
+count did not bring it far enough down. The resulting numbers are from what fits on this machine, and
+they would keep improving with more history rather than plateauing.
 
 ## What it costs
 
