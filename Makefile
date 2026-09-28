@@ -1,4 +1,4 @@
-.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr evaluate
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
@@ -45,6 +45,10 @@ dance:
 
 facts:
 	uv run aftermerge facts
+
+## Benchmark models on gate acceptance rate and cost per accepted result
+evaluate:
+	uv run aftermerge evaluate
 
 ## Build a branch and PR body from a validated fix (local; add --push to go outward)
 pr:

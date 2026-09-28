@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from aftermerge.llm import TokenUsage
 from aftermerge.patcher.patch import Patch, PatchRejected
 
 
@@ -44,6 +45,7 @@ class Proposal:
     files: dict[str, str]
     strategy: str
     origin: str
+    usage: TokenUsage = TokenUsage()
 
 
 class PatchProposer(Protocol):
@@ -79,7 +81,12 @@ def to_patch(proposal: Proposal, *, base_ref: str, repo_root: Path) -> Patch:
         diff = _git(scratch, "diff")
         if not diff.strip():
             raise PatchRejected("proposal is identical to the commit it is meant to fix")
-        return Patch(diff=diff, strategy=proposal.strategy, origin=proposal.origin)
+        return Patch(
+            diff=diff,
+            strategy=proposal.strategy,
+            origin=proposal.origin,
+            usage=proposal.usage,
+        )
     finally:
         subprocess.run(
             ["git", "-C", str(repo_root), "worktree", "remove", "--force", str(scratch)],
@@ -164,6 +171,8 @@ class AnthropicProposer:
 
     def propose(self, context: PatchContext, feedback: str | None = None) -> Proposal:
         files: dict[str, str] = {}
+        # One call per file, so the cost of a proposal is their sum.
+        usage = TokenUsage()
         for path in context.changed_files:
             prompt = PROMPT.format(
                 good_ref=context.good_ref,
@@ -182,12 +191,15 @@ class AnthropicProposer:
                 max_tokens=self._max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
+            usage = usage + TokenUsage.from_response(response)
             text = "".join(
                 block.text for block in response.content if getattr(block, "type", "") == "text"
             ).strip()
             files[path] = _strip_fences(text)
 
-        return Proposal(files=files, strategy="repair", origin=f"{self.name}:{self._model}")
+        return Proposal(
+            files=files, strategy="repair", origin=f"{self.name}:{self._model}", usage=usage
+        )
 
 
 def _read_at(ref: str, path: str, repo_root: Path | None = None) -> str:

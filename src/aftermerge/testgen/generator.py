@@ -19,6 +19,7 @@ import textwrap
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from aftermerge.llm import TokenUsage
 from aftermerge.testgen.context import TestContext
 
 #: Extra queries per request tolerated before a scaling test fails. Small on
@@ -36,6 +37,7 @@ class TestCandidate:
     source: str
     generated_by: str
     rationale: str
+    usage: TokenUsage = TokenUsage()
 
 
 class TestGenerator(Protocol):
@@ -270,6 +272,7 @@ class AnthropicGenerator:
             max_tokens=self._max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
+        usage = TokenUsage.from_response(response)
         source = "".join(
             block.text for block in response.content if getattr(block, "type", "") == "text"
         ).strip()
@@ -285,4 +288,5 @@ class AnthropicGenerator:
             source=source.rstrip() + "\n",
             generated_by=f"{self.name}:{self._model}",
             rationale="generated from incident evidence by a language model",
+            usage=usage,
         )

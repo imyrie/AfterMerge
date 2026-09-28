@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import typer
@@ -15,12 +16,14 @@ from aftermerge import llm
 from aftermerge.detector import service as detector_service
 from aftermerge.detector import windows
 from aftermerge.detector.rules import SLO
+from aftermerge.evaluation.harness import TASKS, TESTGEN, EvalRun, run_matrix
 from aftermerge.investigator import service as investigator_service
 from aftermerge.investigator.code_map import (
     DEFAULT_SOURCE_PREFIX,
     changed_files,
     diff_for,
 )
+from aftermerge.llm import TokenUsage
 from aftermerge.patcher.fix import CANDIDATE_DIR, CANDIDATE_NAME, propose_fix
 from aftermerge.patcher.patch import Patch, PatchRejected
 from aftermerge.patcher.proposer import AnthropicProposer, PatchContext, RevertProposer
@@ -1037,6 +1040,172 @@ def pr(
         console.print("  " + " ".join(command))
 
     console.print("\n[dim]Nothing merges automatically. A person reviews and merges.[/dim]")
+
+
+@app.command()
+def evaluate(
+    models: str = typer.Option(
+        "claude-opus-5,claude-sonnet-5,claude-haiku-4-5-20251001",
+        help="Comma-separated model ids to benchmark.",
+    ),
+    tasks: str = typer.Option("testgen,patch", help=f"Comma-separated: {', '.join(TASKS)}."),
+    attempts: int = typer.Option(
+        1, help="Attempts per run. 1 measures first-attempt acceptance; more measures retries."
+    ),
+    seed: str | None = typer.Option(None, help=SEED_HELP),
+    out: Path | None = typer.Option(None, help="Write the full results as JSON here."),
+) -> None:
+    """Benchmark models on how often their output survives the gate.
+
+    Every run goes through the same validation the pipeline uses, so "accepted"
+    means what it means in production. Cost per accepted result is the headline:
+    a cheap model that is never accepted costs more per useful result than an
+    expensive one that is.
+    """
+    engine = _prepared_engine()
+    repo_root = Path.cwd()
+    model_list = [m.strip() for m in models.split(",") if m.strip()]
+    task_list = [t.strip() for t in tasks.split(",") if t.strip()]
+    for task in task_list:
+        if task not in TASKS:
+            raise typer.BadParameter(f"unknown task {task!r}; use {' or '.join(TASKS)}")
+
+    with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
+        found = IncidentRepository(session).list_recent(limit=1)
+        if not found:
+            console.print("[yellow]no incidents; run `aftermerge detect` first[/yellow]")
+            raise typer.Exit(code=2)
+        incident = found[0]
+        replayable = CapturedRequestRepository(session).replayable_for_incident(incident.id)
+        if not replayable:
+            console.print(
+                "[yellow]no replayable captured requests; run `aftermerge capture`[/yellow]"
+            )
+            raise typer.Exit(code=2)
+        facts = FactRepository(session).for_incident(incident.id)
+        ctx = testgen_context.build(incident, facts, replayable[0], None)
+
+    changed = changed_files(
+        incident.baseline_version, incident.candidate_version, repo_root=repo_root
+    )
+    patch_context = PatchContext(
+        good_ref=incident.baseline_version,
+        bad_ref=incident.candidate_version,
+        changed_files=tuple(c.repo_path for c in changed),
+        code_site=ctx.code_site,
+        baseline_spans_per_request=ctx.baseline_spans_per_request,
+        candidate_spans_per_request=ctx.candidate_spans_per_request,
+        causing_diff=diff_for(
+            incident.baseline_version, incident.candidate_version, repo_root=repo_root
+        ),
+    )
+
+    # Benchmarking overwrites the certified test and the candidate patch. Snapshot
+    # both, restore the test before every patch run so each model starts from the
+    # same gate, and put the originals back at the end -- a benchmark should not
+    # leave the repository in a different state than it found it.
+    test_path = repo_root / "tests" / "regression" / f"{ctx.module_name}.py"
+    original_test = test_path.read_text() if test_path.is_file() else None
+    patch_path = repo_root / CANDIDATE_DIR / CANDIDATE_NAME
+    original_patch = patch_path.read_text() if patch_path.is_file() else None
+
+    def run_one(model: str, task: str) -> EvalRun:
+        started = time.monotonic()
+        if task == TESTGEN:
+            outcome = certify_test(
+                ctx,
+                AnthropicGenerator(llm.get_client(), model=model),
+                repo_root=repo_root,
+                max_attempts=attempts,
+                seed=seed,
+            )
+            usage = TokenUsage()
+            for attempt in outcome.attempts:
+                usage = usage + attempt.candidate.usage
+            return EvalRun(
+                model=model,
+                task=task,
+                accepted=outcome.succeeded,
+                attempts=len(outcome.attempts),
+                usage=usage,
+                seconds=time.monotonic() - started,
+                detail=outcome.summary,
+            )
+
+        # The patch task validates against a certified test, so restore the
+        # known-good one first; otherwise a model is judged on whichever test the
+        # previous run happened to leave behind.
+        if original_test is not None:
+            test_path.parent.mkdir(parents=True, exist_ok=True)
+            test_path.write_text(original_test)
+        outcome_fix = propose_fix(
+            patch_context,
+            AnthropicProposer(llm.get_client(), repo_root=repo_root, model=model),
+            repo_root=repo_root,
+            max_attempts=attempts,
+            seed=seed,
+        )
+        usage = TokenUsage()
+        for attempt_fix in outcome_fix.attempts:
+            usage = usage + attempt_fix.patch.usage
+        return EvalRun(
+            model=model,
+            task=task,
+            accepted=outcome_fix.succeeded,
+            attempts=len(outcome_fix.attempts),
+            usage=usage,
+            seconds=time.monotonic() - started,
+            detail=outcome_fix.summary,
+        )
+
+    def announce(model: str, task: str) -> None:
+        console.print(f"[dim]running {model} / {task} ...[/dim]")
+
+    try:
+        report = run_matrix(model_list, task_list, run_one, on_start=announce)
+    finally:
+        if original_test is not None:
+            test_path.write_text(original_test)
+        if original_patch is not None:
+            patch_path.parent.mkdir(parents=True, exist_ok=True)
+            patch_path.write_text(original_patch)
+        elif patch_path.is_file():
+            patch_path.unlink()
+
+    table = Table(title="model evaluation", title_justify="left", header_style="bold")
+    for column in ("model", "task", "accepted", "attempts", "tokens", "cost", "secs"):
+        table.add_column(column, no_wrap=True)
+    for run in report.runs:
+        cost = f"${run.cost_usd:.4f}" if run.cost_usd is not None else "-"
+        table.add_row(
+            run.model,
+            run.task,
+            "yes" if run.accepted else "no",
+            str(run.attempts),
+            f"{run.usage.total:,}",
+            cost,
+            f"{run.seconds:.0f}",
+        )
+    console.print(table)
+
+    summary = Table(title="per model", title_justify="left", header_style="bold")
+    for column in ("model", "acceptance", "tokens", "cost", "cost / accepted"):
+        summary.add_column(column, no_wrap=True)
+    for model in report.models:
+        total_cost = report.cost(model)
+        per_accepted = report.cost_per_accepted(model)
+        summary.add_row(
+            model,
+            f"{report.acceptance_rate(model):.0%}",
+            f"{report.total_usage(model).total:,}",
+            f"${total_cost:.4f}" if total_cost is not None else "-",
+            f"${per_accepted:.4f}" if per_accepted is not None else "never accepted",
+        )
+    console.print(summary)
+
+    if out is not None:
+        out.write_text(json.dumps(report.as_dict(), indent=2))
+        console.print(f"\nwrote {out}")
 
 
 if __name__ == "__main__":

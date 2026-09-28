@@ -15,8 +15,10 @@ not configurable.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from aftermerge.llm import TokenUsage
 
 #: How the fix relates to the change that caused the regression. A reviewer
 #: needs this: "I reverted your change" and "I rewrote your change" ask very
@@ -36,6 +38,8 @@ class Patch:
     diff: str
     strategy: str
     origin: str
+    #: What producing this cost. Zero for deterministic proposers.
+    usage: TokenUsage = field(default_factory=lambda: TokenUsage())
 
     def __post_init__(self) -> None:
         if self.strategy not in STRATEGIES:

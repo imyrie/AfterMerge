@@ -8,11 +8,45 @@ place that reaches for credentials, and it is deliberately the only place.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_MODEL = "claude-sonnet-5"
 API_KEY_ENV = "ANTHROPIC_API_KEY"
 MODEL_ENV = "AFTERMERGE_MODEL"
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    """What a candidate cost to produce.
+
+    Recorded on every candidate, deterministic ones included, so a benchmark can
+    divide spend by accepted results without special-casing the generators that
+    spend nothing.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    def __add__(self, other: TokenUsage) -> TokenUsage:
+        return TokenUsage(
+            self.input_tokens + other.input_tokens,
+            self.output_tokens + other.output_tokens,
+        )
+
+    @property
+    def total(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    @classmethod
+    def from_response(cls, response: Any) -> TokenUsage:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return cls()
+        return cls(
+            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+        )
 
 
 class LLMUnavailable(Exception):
