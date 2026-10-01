@@ -112,3 +112,24 @@ this table free to be a batch artifact that can be rebuilt on demand.
 `warehouse benchmark` runs both queries, normalises ordering and float noise, and compares the rows
 before reporting any reduction. It exits non-zero if they disagree. A rollup that is fast and wrong
 is worse than no rollup -- the same rule the patch validator follows, for the same reason.
+
+## Reporting views over the rollup
+
+`route_latency_trend.sql` answers "which way is it moving" rather than "are these two versions
+different right now". Each day's value has to sit next to its neighbours instead of being aggregated
+with them, so the daily buckets are built in a CTE and then read with window functions -- a rolling
+3-day mean, the day-over-day delta, and a per-version day index.
+
+Two details are easy to get wrong:
+
+**`quantilesMerge` takes the same `(0.5, 0.95, 0.99)` the state was built with** and indexes p95 out
+at `[2]`. Merging with a different parameter list than `quantilesState` used is an error, not a
+reinterpretation.
+
+**`lagInFrame(p95_ms, 1, NULL)`, not `lagInFrame(p95_ms)`.** The two-argument form returns the
+column's *default* when there is no previous row, so on each version's first day `p95_ms - lag`
+evaluated to `p95_ms - 0` and reported the entire latency as that day's change -- a 17-second jump
+that never happened, on the one row where the honest answer is "unknown". The explicit `NULL`
+default makes the subtraction `NULL`.
+
+Reading the rollup rather than raw spans, the whole trend costs 18 rows read.
