@@ -8,6 +8,9 @@ from typing import Any
 from sqlalchemy import text
 
 from aftermerge.dataquality.checks import (
+    ADVISORY,
+    BLOCKING,
+    COLUMN_VOCABULARIES,
     FAILED,
     KNOWN_STATUS_CODES,
     PASSED,
@@ -50,43 +53,79 @@ def check_freshness(ch: Any, *, max_staleness_minutes: int) -> CheckResult:
 
 
 def check_filter_literals_match_data(ch: Any, *, queries_dir: Path) -> CheckResult:
-    """Every literal the catalog filters on must actually occur in the data.
+    """Literals the catalog filters on, checked against the column's vocabulary.
 
     This is the check that would have caught `StatusCode = 'STATUS_CODE_ERROR'`.
     A filter that matches nothing does not raise; it silently returns zero, and
     zero is a plausible number for an error count.
+
+    Two findings, with different consequences, both of which look like "returns
+    zero" from the query's side:
+
+    *Impossible* -- the literal is not in the vocabulary the exporter can emit,
+    so no data will ever satisfy it. `'STATUS_CODE_ERROR'` is this. The metric is
+    broken and the data is not worth analysing until the query is fixed, so this
+    blocks.
+
+    *Absent* -- the literal is valid but does not occur in the current window.
+    `StatusCode='Error'` is this during a latency-only regression: there genuinely
+    are no error spans. Nothing is wrong with the data or the query; the one
+    metric reads zero and the reader should know why. That is advisory.
+
+    Collapsing the two would mean either missing the first or refusing to analyse
+    any window that happens to be free of errors.
     """
-    missing: list[str] = []
+    impossible: list[str] = []
+    absent: list[str] = []
     checked = 0
     for column in WATCHED_FILTER_COLUMNS:
         literals = filter_literals(queries_dir, column)
         if not literals:
             continue
+        vocabulary = COLUMN_VOCABULARIES.get(column, frozenset())
         observed = {
             str(row[0])
             for row in ch.query(f"SELECT DISTINCT {column} FROM otel_traces").result_rows
         }
         for literal in sorted(literals):
             checked += 1
-            if literal not in observed:
-                missing.append(f"{column}='{literal}' never occurs (observed: {sorted(observed)})")
+            if vocabulary and literal not in vocabulary:
+                impossible.append(
+                    f"{column}='{literal}' is not a value the exporter emits "
+                    f"(vocabulary: {sorted(vocabulary)}); the filter can never match"
+                )
+            elif literal not in observed:
+                absent.append(
+                    f"{column}='{literal}' does not occur in the current data "
+                    f"(observed: {sorted(observed)}); that metric reads zero"
+                )
 
+    measured = {"literals_checked": checked, "impossible": impossible, "absent": absent}
     if not checked:
         return CheckResult(
             "filter_literals_match_data", SKIPPED, "no watched filter literals found"
         )
-    if missing:
+    if impossible:
         return CheckResult(
             "filter_literals_match_data",
             FAILED,
-            "; ".join(missing) + " -- such a filter returns zero rather than failing",
-            {"literals_checked": checked, "missing": missing},
+            "; ".join(impossible),
+            measured,
+            severity=BLOCKING,
+        )
+    if absent:
+        return CheckResult(
+            "filter_literals_match_data",
+            FAILED,
+            "; ".join(absent),
+            measured,
+            severity=ADVISORY,
         )
     return CheckResult(
         "filter_literals_match_data",
         PASSED,
-        f"all {checked} filter literal(s) occur in the data",
-        {"literals_checked": checked},
+        f"all {checked} filter literal(s) are valid and occur in the data",
+        measured,
     )
 
 

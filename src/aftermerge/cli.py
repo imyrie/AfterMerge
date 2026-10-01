@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from aftermerge import llm
+from aftermerge.dataquality.checks import ADVISORY
 from aftermerge.dataquality.runner import (
     DEFAULT_LOOKBACK_MINUTES,
     DEFAULT_MAX_STALENESS_MINUTES,
@@ -1233,9 +1234,12 @@ def dq(
 ) -> None:
     """Check the data before anything draws conclusions from it.
 
-    Exits 0 when the data is trustworthy, 1 when a check fails, 2 when no check
-    could produce evidence. A failing check should block downstream analysis: a
-    wrong number that looks plausible is worse than a missing one.
+    Exits 0 when the data is trustworthy, 1 when a blocking check fails, 2 when
+    no check could produce evidence. A blocking failure should stop downstream
+    analysis: a wrong number that looks plausible is worse than a missing one.
+
+    An advisory finding prints but does not change the exit code -- it means one
+    metric needs a caveat, not that the data is unfit to analyse.
     """
     try:
         ch: object | None = client.get_client()
@@ -1271,15 +1275,23 @@ def dq(
         for column in ("check", "status", "detail"):
             table.add_column(column, overflow="fold")
         for result in report.results:
-            colour = {"passed": "green", "failed": "red", "skipped": "yellow"}[result.status]
-            table.add_row(result.name, f"[{colour}]{result.status}[/{colour}]", result.detail)
+            # An advisory failure gets its own label: rendering it as a red
+            # "failed" next to an exit code of 0 reads like a bug in the tool.
+            label = "advisory" if (result.failed and result.severity == ADVISORY) else result.status
+            colour = {
+                "passed": "green",
+                "failed": "red",
+                "skipped": "yellow",
+                "advisory": "yellow",
+            }[label]
+            table.add_row(result.name, f"[{colour}]{label}[/{colour}]", result.detail)
         console.print(table)
         colour = "green" if report.passed else "red"
         console.print(f"\n[{colour}]{report.summary}[/{colour}]")
 
     if report.passed:
         raise typer.Exit(code=0)
-    raise typer.Exit(code=1 if report.failures else 2)
+    raise typer.Exit(code=1 if report.blocking_failures else 2)
 
 
 warehouse_app = typer.Typer(help="Manage the telemetry warehouse.", no_args_is_help=True)

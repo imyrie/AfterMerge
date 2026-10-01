@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from aftermerge.dataquality.checks import (
+    ADVISORY,
+    BLOCKING,
     FAILED,
     PASSED,
     SKIPPED,
@@ -47,12 +49,16 @@ def test_filter_literals_are_extracted_from_the_catalog(tmp_path: Path) -> None:
     assert filter_literals(tmp_path, "SpanKind") == {"Server"}
 
 
-def test_a_literal_that_never_occurs_is_caught(tmp_path: Path) -> None:
+def test_a_literal_outside_the_vocabulary_blocks(tmp_path: Path) -> None:
     """The exact historical defect.
 
     `StatusCode = 'STATUS_CODE_ERROR'` matched nothing because ClickHouse writes
     'Error'. Nothing failed -- the error count simply read zero, for every
     measurement in every slice, and zero is a plausible error count.
+
+    No data will ever satisfy that filter, so this blocks the pipeline. It must
+    keep blocking even when the window happens to contain 'Error' spans, which
+    is why the vocabulary and not the observed set decides.
     """
     (tmp_path / "q.sql").write_text("SELECT countIf(StatusCode = 'STATUS_CODE_ERROR') FROM t")
     ch = FakeCH({"DISTINCT StatusCode": [("Unset",), ("Error",)]})
@@ -60,8 +66,48 @@ def test_a_literal_that_never_occurs_is_caught(tmp_path: Path) -> None:
     result = check_filter_literals_match_data(ch, queries_dir=tmp_path)
 
     assert result.status == FAILED
+    assert result.severity == BLOCKING
+    assert result.blocks
     assert "STATUS_CODE_ERROR" in result.detail
-    assert "returns zero rather than failing" in result.detail
+    assert "can never match" in result.detail
+
+
+def test_a_valid_literal_absent_from_the_window_is_only_advisory(tmp_path: Path) -> None:
+    """A latency-only regression produces no error spans.
+
+    `StatusCode = 'Error'` is correct, the data is sound, and the error metric
+    legitimately reads zero. Blocking here would refuse to analyse any window
+    that happened to be free of errors -- which is most of them.
+    """
+    (tmp_path / "q.sql").write_text("SELECT countIf(StatusCode = 'Error') FROM t")
+    ch = FakeCH({"DISTINCT StatusCode": [("Unset",)]})
+
+    result = check_filter_literals_match_data(ch, queries_dir=tmp_path)
+
+    assert result.status == FAILED
+    assert result.severity == ADVISORY
+    assert not result.blocks
+    assert "reads zero" in result.detail
+
+
+def test_an_advisory_does_not_fail_the_report_but_is_reported() -> None:
+    report = DataQualityReport(
+        results=(
+            CheckResult("a", PASSED, ""),
+            CheckResult("b", FAILED, "metric reads zero", severity=ADVISORY),
+        )
+    )
+    assert report.passed
+    assert not report.blocking_failures
+    assert len(report.advisories) == 1
+    assert "advisory" in report.summary
+    assert "metric reads zero" in report.summary
+
+
+def test_severity_defaults_to_blocking() -> None:
+    """A new check has to opt out of blocking deliberately, not by omission."""
+    assert CheckResult("x", FAILED, "").severity == BLOCKING
+    assert CheckResult("x", FAILED, "").blocks
 
 
 def test_literals_that_do_occur_pass(tmp_path: Path) -> None:
