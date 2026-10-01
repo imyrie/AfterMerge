@@ -111,7 +111,8 @@ provenance a lie.
 | `uv run aftermerge gate` | check a test fails@bad and passes@good (exit 0 = discriminates) |
 | `uv run aftermerge validate` | prove a candidate fix removes the fault and changes nothing else |
 | `uv run aftermerge fix` | propose a fix and keep it only if validation accepts it |
-| `uv run aftermerge warehouse apply` | create rollup tables and backfill history |
+| `uv run aftermerge warehouse apply` | create the rollup tables |
+| `uv run aftermerge warehouse refresh` | incrementally load only the days that changed |
 | `uv run aftermerge warehouse benchmark` | verify rollups agree with raw, then report scan cost |
 | `uv run aftermerge stream` | consume spans from Kafka and reach a verdict during a rollout |
 | `uv run aftermerge dq` | check data quality; exits non-zero to block analysis on bad data |

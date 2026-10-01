@@ -60,16 +60,52 @@ pushes its memory tracker past the container's 3.44 GiB ceiling, and capping blo
 count did not bring it far enough down. The resulting numbers are from what fits on this machine, and
 they would keep improving with more history rather than plateauing.
 
-## What it costs
+## Loading
 
-**Time resolution.** Buckets are daily, so rollup-backed queries answer "which day", not "which
-minute". Raw remains the source of truth for narrow windows and for the detector's per-request
-duration samples, which cannot come from an aggregate at all.
+```bash
+uv run aftermerge warehouse apply      # create the tables
+uv run aftermerge warehouse refresh    # load only what changed
+```
 
-**Backfill is not automatic.** Materialised views only see new inserts, so `warehouse apply`
-rebuilds history explicitly. It truncates first, because `AggregatingMergeTree` combines rows with
-equal keys rather than replacing them -- re-inserting over existing buckets would double count. That
-assumes ingest is quiet: a span arriving between the truncate and the insert is counted twice.
+Creating the tables and filling them are separate commands, because they fail for
+different reasons and a scheduler should be able to retry the second without re-running
+the first.
+
+### Incremental, by day partition
+
+The loader reads a watermark -- the newest day already in the rollup -- and rebuilds only
+the days at or after it. Measured on an 11-day benchmark table, a refresh after one new
+day of spans arrives reads **33% of what a full rebuild reads**, and that share falls as
+retention grows: the rebuild gets more expensive every day, the incremental window does not.
+
+Three details carry most of the correctness:
+
+**The watermark day is reloaded, not skipped.** Spans for a day keep arriving until the day
+ends, so the newest rolled-up day was almost certainly incomplete when it was written.
+Loading strictly *after* the watermark would leave every boundary day permanently short.
+
+**A trailing window is reloaded anyway** (`--lookback-days`, default 2). A span can arrive
+after its own day has been rolled up -- a delayed export, a collector restart, a backfilled
+queue. Loading strictly forward would never see it, and the rollup would disagree with raw
+forever in a way no query reveals.
+
+**Each day is dropped before it is inserted.** `AggregatingMergeTree` merges rows with equal
+keys rather than replacing them, so inserting over an existing day would *add* to it. Drop
+then insert makes the load idempotent, which is what lets a scheduler retry a failed task
+safely.
+
+### Why there are no materialised views any more
+
+The first version of this used materialised views for live updates plus a truncate-and-reload
+backfill for history. That cannot be made idempotent: a view fires on insert, so a refresh
+touching a day the view had already covered double counts it, and a truncate-then-reload has
+a window where concurrent inserts are counted twice.
+
+Partitions are daily rather than monthly for the same reason -- ClickHouse drops whole
+partitions atomically, so monthly partitions would mean one late span rewrites the month.
+
+Real-time reaction is the streaming consumer's job (see `docs/streaming.md`), which leaves
+this table free to be a batch artifact that can be rebuilt on demand.
 
 ## Equivalence is checked before speed
 

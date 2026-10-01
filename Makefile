@@ -49,6 +49,7 @@ facts:
 ## Create warehouse rollups and verify they agree with raw
 rollup:
 	uv run aftermerge warehouse apply
+	uv run aftermerge warehouse refresh
 	uv run aftermerge warehouse benchmark
 
 ## Follow spans on Kafka and report a verdict during the rollout

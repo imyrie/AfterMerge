@@ -1288,26 +1288,61 @@ app.add_typer(warehouse_app, name="warehouse")
 
 @warehouse_app.command("apply")
 def warehouse_apply(
-    backfill: bool = typer.Option(True, help="Rebuild rollups from existing raw spans."),
     database: str | None = typer.Option(
         None, help="Target database. Defaults to the configured one."
     ),
+    recreate: bool = typer.Option(
+        False, help="Drop and recreate the rollup tables. Needed after a schema change."
+    ),
 ) -> None:
-    """Create the rollup tables and materialised views, and fill in history.
+    """Create the rollup tables.
 
-    Materialised views only see new inserts, so without the backfill the rollups
-    would answer correctly about the future and wrongly about the past.
+    Loading them is a separate step (`warehouse refresh`), because creating a
+    table and filling it have different failure modes and a scheduler should be
+    able to retry the second without re-running the first.
     """
     ch = client.get_client(database)
+    if recreate:
+        for table in rollup_mod.LOADS:
+            ch.command(f"DROP TABLE IF EXISTS {table}")
+        console.print(f"dropped {len(rollup_mod.LOADS)} rollup table(s)")
     applied = rollup_mod.apply(ch)
     console.print(f"applied {applied} statement(s)")
 
-    if backfill:
-        counts = rollup_mod.backfill(ch)
-        for table, rows in counts.items():
-            console.print(f"  {table}: {rows:,} rows")
-    raw = ch.query("SELECT count() FROM otel_traces").result_rows[0][0]
-    console.print(f"\nraw otel_traces: {int(raw):,} rows")
+
+@warehouse_app.command("refresh")
+def warehouse_refresh(
+    database: str | None = typer.Option(None, help="Target database."),
+    full: bool = typer.Option(False, help="Rebuild every day rather than only what changed."),
+    lookback_days: int = typer.Option(
+        rollup_mod.DEFAULT_LOOKBACK_DAYS,
+        help="Days behind the watermark to reload anyway, for late-arriving spans.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
+) -> None:
+    """Bring the rollups up to date, reprocessing only the days that changed.
+
+    Idempotent: each day is dropped and rebuilt, so re-running produces the same
+    result. That is what makes the step safe for a scheduler to retry.
+    """
+    ch = client.get_client(database)
+    report = rollup_mod.refresh(ch, full=full, lookback_days=lookback_days)
+
+    if as_json:
+        console.print_json(json.dumps(report.as_dict()))
+    else:
+        table = Table(title="rollup refresh", title_justify="left", header_style="bold")
+        for column in ("table", "days", "rows scanned", "rows written"):
+            table.add_column(column, no_wrap=True)
+        for load in report.loads:
+            table.add_row(
+                load.table,
+                str(len(load.days)) if load.days else "-",
+                f"{load.rows_scanned:,}",
+                f"{load.rows_written:,}",
+            )
+        console.print(table)
+        console.print(f"\n{report.summary}")
 
 
 @warehouse_app.command("benchmark")

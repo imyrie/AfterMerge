@@ -15,9 +15,10 @@ from aftermerge.telemetry import client
 
 DDL_PATH = Path("infra/clickhouse/rollups.sql")
 
-#: Rollup table -> the SELECT that rebuilds it from raw. Materialised views only
-#: see new inserts, so history has to be filled in explicitly.
-BACKFILL: dict[str, str] = {
+#: Rollup table -> the SELECT that builds it, parameterised by day. `{day}` is
+#: substituted with the partition being loaded, so one day can be rebuilt without
+#: touching any other.
+LOADS: dict[str, str] = {
     "otel_route_rollup": """
         SELECT toDate(Timestamp), ServiceName, SpanName,
                ResourceAttributes['service.version'],
@@ -25,7 +26,7 @@ BACKFILL: dict[str, str] = {
                quantilesState(0.5, 0.95, 0.99)(Duration / 1e6),
                sumState(toUInt64(StatusCode = 'Error'))
         FROM otel_traces
-        WHERE SpanKind = 'Server'
+        WHERE SpanKind = 'Server' AND toDate(Timestamp) = toDate('{day}')
         GROUP BY 1, 2, 3, 4
     """,
     "otel_db_work_rollup": """
@@ -35,9 +36,20 @@ BACKFILL: dict[str, str] = {
                countState(), uniqExactState(TraceId)
         FROM otel_traces
         WHERE SpanKind = 'Client' AND SpanAttributes['code.file.path'] != ''
+          AND toDate(Timestamp) = toDate('{day}')
         GROUP BY 1, 2, 3, 4
     """,
 }
+
+#: Days behind the watermark that are reloaded anyway.
+#:
+#: A span can arrive after its own day has been rolled up -- a delayed export, a
+#: collector restart, a backfilled queue. Loading strictly forward of the
+#: watermark would never see it, and the rollup would disagree with raw forever
+#: in a way no query reveals. Reloading a trailing window costs little and is
+#: how incremental loads stay correct.
+DEFAULT_LOOKBACK_DAYS = 2
+
 
 #: Questions answered both ways, for the equivalence and cost comparison.
 EQUIVALENTS: tuple[tuple[str, str, str], ...] = (
@@ -139,21 +151,159 @@ def apply(ch: Any, *, ddl_path: Path = DDL_PATH) -> int:
     return applied
 
 
-def backfill(ch: Any) -> dict[str, int]:
-    """Rebuild rollups from raw.
+@dataclass(frozen=True)
+class TableLoad:
+    table: str
+    days: tuple[str, ...]
+    rows_scanned: int
+    rows_written: int
 
-    Truncates first, because re-inserting over existing buckets would double
-    count: AggregatingMergeTree combines rows with equal keys rather than
-    replacing them. Assumes ingest is quiet -- a span arriving between the
-    truncate and the insert is counted by the materialised view and by the
-    backfill both.
+    @property
+    def skipped(self) -> bool:
+        return not self.days
+
+
+@dataclass(frozen=True)
+class RefreshReport:
+    loads: tuple[TableLoad, ...]
+    full: bool
+    raw_rows: int
+
+    @property
+    def rows_scanned(self) -> int:
+        return sum(load.rows_scanned for load in self.loads)
+
+    @property
+    def days_loaded(self) -> int:
+        return max((len(load.days) for load in self.loads), default=0)
+
+    @property
+    def full_rebuild_rows(self) -> int:
+        """What a full rebuild would read: every raw row, once per rollup table."""
+        return self.raw_rows * len(self.loads)
+
+    @property
+    def fraction_reprocessed(self) -> float:
+        """Share of a full rebuild's work this refresh actually did.
+
+        Measured against every table's scan, not the raw row count: each rollup
+        reads the same days independently, so comparing their sum to a single
+        table's worth of rows reported 200% for a two-table full rebuild.
+        """
+        total = self.full_rebuild_rows
+        return self.rows_scanned / total if total else 0.0
+
+    @property
+    def summary(self) -> str:
+        if not self.days_loaded:
+            return "already up to date; nothing reprocessed"
+        mode = "full rebuild" if self.full else "incremental"
+        return (
+            f"{mode}: {self.days_loaded} day(s), {self.rows_scanned:,} of "
+            f"{self.full_rebuild_rows:,} rows a full rebuild would read "
+            f"({self.fraction_reprocessed:.1%})"
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "full": self.full,
+            "raw_rows": self.raw_rows,
+            "rows_scanned": self.rows_scanned,
+            "full_rebuild_rows": self.full_rebuild_rows,
+            "fraction_reprocessed": round(self.fraction_reprocessed, 4),
+            "summary": self.summary,
+            "tables": [
+                {
+                    "table": load.table,
+                    "days": list(load.days),
+                    "rows_scanned": load.rows_scanned,
+                    "rows_written": load.rows_written,
+                }
+                for load in self.loads
+            ],
+        }
+
+
+def watermark(ch: Any, table: str) -> str | None:
+    """The newest day present in a rollup, or None when it is empty."""
+    rows = ch.query(f"SELECT max(day) FROM {table}").result_rows
+    value = rows[0][0] if rows and rows[0] else None
+    # ClickHouse returns the zero date for an empty table rather than NULL.
+    if value is None or str(value).startswith("1970-01-01"):
+        return None
+    return str(value)[:10]
+
+
+def days_to_load(
+    ch: Any,
+    table: str,
+    *,
+    full: bool = False,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+) -> list[str]:
+    """Which day partitions need rebuilding.
+
+    The watermark day itself is always reloaded: it was almost certainly
+    incomplete when it was written, since spans for a day keep arriving until it
+    ends. Loading strictly after the watermark would leave every boundary day
+    permanently short.
     """
-    counts: dict[str, int] = {}
-    for table, select in BACKFILL.items():
-        ch.command(f"TRUNCATE TABLE {table}")
-        ch.command(f"INSERT INTO {table} {select}")
-        counts[table] = int(ch.query(f"SELECT count() FROM {table}").result_rows[0][0])
-    return counts
+    mark = None if full else watermark(ch, table)
+    where = "" if mark is None else f"WHERE toDate(Timestamp) >= toDate('{mark}') - {lookback_days}"
+
+    rows = ch.query(
+        f"SELECT DISTINCT toDate(Timestamp) AS day FROM otel_traces {where} ORDER BY day"
+    ).result_rows
+    return [str(row[0])[:10] for row in rows]
+
+
+def load_day(ch: Any, table: str, day: str) -> tuple[int, int]:
+    """Rebuild one day partition. Returns (rows scanned, rows written).
+
+    Drop-then-insert rather than insert-on-top: AggregatingMergeTree merges rows
+    with equal keys, so inserting over an existing day would add to it rather
+    than replace it. Dropping first is what makes this safe to re-run, which is
+    what a scheduler needs when it retries a failed task.
+    """
+    scanned = int(
+        ch.query(
+            "SELECT count() FROM otel_traces WHERE toDate(Timestamp) = toDate({day:String})",
+            parameters={"day": day},
+        ).result_rows[0][0]
+    )
+    ch.command(f"ALTER TABLE {table} DROP PARTITION '{day}'")
+    ch.command(f"INSERT INTO {table} {LOADS[table].format(day=day)}")
+    written = int(
+        ch.query(
+            f"SELECT count() FROM {table} WHERE day = toDate({{day:String}})",
+            parameters={"day": day},
+        ).result_rows[0][0]
+    )
+    return scanned, written
+
+
+def refresh(
+    ch: Any,
+    *,
+    full: bool = False,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+) -> RefreshReport:
+    """Bring the rollups up to date, reprocessing only what changed."""
+    raw_rows = int(ch.query("SELECT count() FROM otel_traces").result_rows[0][0])
+
+    loads: list[TableLoad] = []
+    for table in LOADS:
+        days = days_to_load(ch, table, full=full, lookback_days=lookback_days)
+        scanned = written = 0
+        for day in days:
+            day_scanned, day_written = load_day(ch, table, day)
+            scanned += day_scanned
+            written += day_written
+        loads.append(
+            TableLoad(table=table, days=tuple(days), rows_scanned=scanned, rows_written=written)
+        )
+
+    return RefreshReport(loads=tuple(loads), full=full, raw_rows=raw_rows)
 
 
 def _profile(

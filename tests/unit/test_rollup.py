@@ -95,3 +95,130 @@ def test_as_dict_is_json_safe() -> None:
     payload = json.loads(json.dumps(RollupBenchmark(comparisons=(comparison(),)).as_dict()))
     assert payload["all_equivalent"] is True
     assert payload["comparisons"][0]["rows_reduction"] == 14431.5
+
+
+# --- incremental loading -----------------------------------------------------
+
+from aftermerge.warehouse.rollup import (  # noqa: E402
+    DEFAULT_LOOKBACK_DAYS,
+    RefreshReport,
+    TableLoad,
+    days_to_load,
+    watermark,
+)
+
+
+class FakeCH:
+    """Answers queries by matching a fragment of the SQL."""
+
+    def __init__(self, answers: dict[str, list[tuple]]) -> None:
+        self.answers = answers
+        self.commands: list[str] = []
+        self.queries: list[str] = []
+
+    def query(self, sql: str, parameters: dict | None = None):
+        self.queries.append(sql)
+        for fragment, rows in self.answers.items():
+            if fragment in sql:
+                return type("R", (), {"result_rows": rows, "summary": {}})()
+        return type("R", (), {"result_rows": [], "summary": {}})()
+
+    def command(self, sql: str) -> None:
+        self.commands.append(sql)
+
+
+def test_an_empty_rollup_has_no_watermark() -> None:
+    """ClickHouse returns the zero date for max() over an empty table, not NULL."""
+    assert watermark(FakeCH({"max(day)": [("1970-01-01",)]}), "t") is None
+    assert watermark(FakeCH({"max(day)": [(None,)]}), "t") is None
+
+
+def test_a_populated_rollup_reports_its_newest_day() -> None:
+    assert watermark(FakeCH({"max(day)": [("2026-09-28",)]}), "t") == "2026-09-28"
+
+
+def test_an_empty_rollup_loads_every_day() -> None:
+    ch = FakeCH(
+        {
+            "max(day)": [("1970-01-01",)],
+            "DISTINCT": [("2026-09-26",), ("2026-09-27",), ("2026-09-28",)],
+        }
+    )
+    assert len(days_to_load(ch, "t")) == 3
+
+
+def test_full_ignores_the_watermark() -> None:
+    ch = FakeCH(
+        {
+            "max(day)": [("2026-09-28",)],
+            "DISTINCT": [("2026-09-26",), ("2026-09-27",), ("2026-09-28",)],
+        }
+    )
+    assert len(days_to_load(ch, "t", full=True)) == 3
+
+
+def test_the_watermark_day_is_reloaded_not_skipped() -> None:
+    """The boundary day was almost certainly incomplete when it was written.
+
+    Spans for a day keep arriving until it ends, so loading strictly after the
+    watermark leaves every boundary day permanently short.
+    """
+    ch = FakeCH({"max(day)": [("2026-09-28",)], "DISTINCT": [("2026-09-28",)]})
+    assert days_to_load(ch, "t", lookback_days=0) == ["2026-09-28"]
+
+    # The generated predicate must be >=, not >, or the boundary day is skipped.
+    predicate = next(q for q in ch.queries if "DISTINCT" in q)
+    assert ">= toDate('2026-09-28')" in predicate
+    assert "> toDate('2026-09-28')" not in predicate.replace(">= toDate", "")
+
+
+def test_a_day_is_dropped_before_it_is_inserted() -> None:
+    """AggregatingMergeTree merges equal keys, so inserting over a day adds to it.
+
+    Dropping first is what makes the load idempotent, and therefore safe for a
+    scheduler to retry.
+    """
+    from aftermerge.warehouse.rollup import load_day
+
+    ch = FakeCH({"count()": [(100,)]})
+    load_day(ch, "otel_route_rollup", "2026-09-28")
+
+    assert any(c.startswith("ALTER TABLE") and "DROP PARTITION" in c for c in ch.commands)
+    assert ch.commands.index(
+        next(c for c in ch.commands if "DROP PARTITION" in c)
+    ) < ch.commands.index(next(c for c in ch.commands if c.startswith("INSERT")))
+
+
+def report(scanned: int, raw: int, tables: int = 2) -> RefreshReport:
+    loads = tuple(
+        TableLoad(
+            table=f"t{i}", days=("2026-09-28",), rows_scanned=scanned // tables, rows_written=1
+        )
+        for i in range(tables)
+    )
+    return RefreshReport(loads=loads, full=False, raw_rows=raw)
+
+
+def test_the_full_rebuild_baseline_counts_every_table() -> None:
+    """Comparing both tables' scans to one table's rows reported 200% for a
+    full rebuild, which is how this was found."""
+    assert report(scanned=200, raw=100, tables=2).full_rebuild_rows == 200
+    assert report(scanned=200, raw=100, tables=2).fraction_reprocessed == 1.0
+
+
+def test_a_partial_refresh_reports_its_share() -> None:
+    assert report(scanned=50, raw=100, tables=2).fraction_reprocessed == 0.25
+
+
+def test_a_refresh_with_nothing_to_do_says_so() -> None:
+    empty = RefreshReport(
+        loads=(TableLoad(table="t", days=(), rows_scanned=0, rows_written=0),),
+        full=False,
+        raw_rows=100,
+    )
+    assert "already up to date" in empty.summary
+
+
+def test_the_default_lookback_tolerates_late_arrivals() -> None:
+    """Strictly-forward loading would never see a span that arrived late."""
+    assert DEFAULT_LOOKBACK_DAYS >= 1
