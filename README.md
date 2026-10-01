@@ -15,8 +15,8 @@ aftermerge fix && aftermerge pr               # a validated patch and a PR body
 ```
 
 Every conclusion is backed by a recorded artifact — a SQL result, a process exit code, a diff — rather than
-a model's opinion. See [docs/PLAN.md](docs/PLAN.md) for the architecture and [docs/slice-0.md](docs/slice-0.md)
-for the current build checklist.
+a model's opinion. See [docs/PLAN.md](docs/PLAN.md) for the architecture, [docs/airflow.md](docs/airflow.md)
+for how the loop runs on a schedule, and [docs/slice-0.md](docs/slice-0.md) for the current build checklist.
 
 ## Status
 
@@ -39,6 +39,7 @@ for the current build checklist.
 | 3 / Proposal | Generate a candidate fix | **done** |
 | 3 / Pull request | Branch, body, `--push` behind a flag | **done** |
 | Scenario 002 | Inverse signal profile — latency up, work flat | **done** — see docs/scenario-002.md |
+| Orchestration | Hourly Airflow DAG with a data-quality gate | **done** — see docs/airflow.md |
 
 ## Quickstart
 
@@ -118,6 +119,7 @@ provenance a lie.
 | `uv run aftermerge dq` | check data quality; exits non-zero to block analysis on bad data |
 | `uv run aftermerge evaluate` | benchmark models on how often their output survives the gate |
 | `uv run aftermerge pr` | build a branch and PR body locally (`--push` / `--open` to go outward) |
+| `make dag` | run the scheduled pipeline once end to end (needs the `airflow` group) |
 | `make investigate` | detect, correlate with the diff, write `incident-report.md` |
 | `make test` / `make test-all` | fast suite / including the slow docker sandbox tests |
 | `make lint` | ruff check + format check |
@@ -135,6 +137,10 @@ uv run python scripts/verify_span.py <trace_id>
 Every push and pull request runs lint, format check and mypy, then the test suite with a PostgreSQL
 service so the audit-trail integration tests execute rather than skip.
 
+Airflow is an optional dependency group, so `uv sync --frozen` does not install it and the DAG
+tests skip rather than fail on the runner. The orchestrator is a consumer of this pipeline, not
+something the pipeline needs in order to be correct.
+
 The `slow` marker stays out of CI. Those tests drive Docker Compose projects and reach a ClickHouse
 container by name -- a local developer topology rather than something a runner provides. Run them
 locally with `make test-all`.
@@ -149,6 +155,7 @@ src/aftermerge/  the pipeline
   store/         durable audit trail (Postgres), separate from the demo app's db
 fixtures/        the demo app under test (phase B)
 docs/            plan and per-slice checklists
+dags/            airflow dag that runs the read side hourly
 ```
 
 ## Ports

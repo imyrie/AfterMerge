@@ -1,4 +1,4 @@
-.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr evaluate dq rollup stream
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr evaluate dq rollup stream dag
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
@@ -51,6 +51,14 @@ rollup:
 	uv run aftermerge warehouse apply
 	uv run aftermerge warehouse refresh
 	uv run aftermerge warehouse benchmark
+
+## Run the scheduled pipeline once, end to end (needs the airflow group)
+dag:
+	AIRFLOW_HOME=$(or $(AIRFLOW_HOME),$(CURDIR)/.airflow) \
+	AIRFLOW__CORE__DAGS_FOLDER=$(CURDIR)/dags \
+	AIRFLOW__CORE__LOAD_EXAMPLES=False \
+	AFTERMERGE_HOME=$(CURDIR) \
+	uv run --group airflow airflow dags test aftermerge_pipeline
 
 ## Follow spans on Kafka and report a verdict during the rollout
 stream:

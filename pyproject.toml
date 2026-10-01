@@ -23,6 +23,9 @@ dependencies = [
 aftermerge = "aftermerge.cli:app"
 
 [dependency-groups]
+airflow = [
+    "apache-airflow>=3.0",
+]
 dev = [
     "mypy>=1.14",
     "pytest>=8.3",
