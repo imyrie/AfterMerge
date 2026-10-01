@@ -16,7 +16,8 @@ aftermerge fix && aftermerge pr               # a validated patch and a PR body
 
 Every conclusion is backed by a recorded artifact — a SQL result, a process exit code, a diff — rather than
 a model's opinion. See [docs/PLAN.md](docs/PLAN.md) for the architecture, [docs/airflow.md](docs/airflow.md)
-for how the loop runs on a schedule, and [docs/slice-0.md](docs/slice-0.md) for the current build checklist.
+for how the loop runs on a schedule, [docs/nl2sql.md](docs/nl2sql.md) for the gate on generated SQL,
+and [docs/slice-0.md](docs/slice-0.md) for the current build checklist.
 
 ## Status
 
@@ -40,6 +41,7 @@ for how the loop runs on a schedule, and [docs/slice-0.md](docs/slice-0.md) for 
 | 3 / Pull request | Branch, body, `--push` behind a flag | **done** |
 | Scenario 002 | Inverse signal profile — latency up, work flat | **done** — see docs/scenario-002.md |
 | Orchestration | Hourly Airflow DAG with a data-quality gate | **done** — see docs/airflow.md |
+| Text to SQL | Gated metric requests, diffed against the catalog | **done** — see docs/nl2sql.md |
 
 ## Quickstart
 
@@ -117,6 +119,7 @@ provenance a lie.
 | `uv run aftermerge warehouse benchmark` | verify rollups agree with raw, then report scan cost |
 | `uv run aftermerge stream` | consume spans from Kafka and reach a verdict during a rollout |
 | `uv run aftermerge dq` | check data quality; exits non-zero to block analysis on bad data |
+| `uv run aftermerge ask "<question>"` | translate a metric request into gated, executed SQL |
 | `uv run aftermerge evaluate` | benchmark models on how often their output survives the gate |
 | `uv run aftermerge pr` | build a branch and PR body locally (`--push` / `--open` to go outward) |
 | `make dag` | run the scheduled pipeline once end to end (needs the `airflow` group) |

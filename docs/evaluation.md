@@ -6,7 +6,7 @@ output survive the gate?** Every run goes through the same validation the pipeli
 predecessor, or a patch that restores both the query count and the response bytes.
 
 ```bash
-uv run aftermerge evaluate --models claude-opus-5,claude-sonnet-5 --tasks testgen,patch
+uv run aftermerge evaluate --models claude-opus-5,claude-sonnet-5 --tasks testgen,patch,nl2sql
 ```
 
 ## Results, 2026-09-28
@@ -55,3 +55,16 @@ harness measures; dollars are derived.
 The certified test and candidate patch are snapshotted and restored around the matrix, and the
 known-good certified test is restored before every patch run -- otherwise a model would be judged
 against whichever test the previous run happened to leave behind.
+
+## Tasks
+
+| task | accepted means | needs an incident |
+|---|---|---|
+| `testgen` | the test failed on the defect and passed on its predecessor | yes |
+| `patch` | the patch restored the query count and the response bytes | yes |
+| `nl2sql` | the generated SQL agreed with a hand-written catalog query on every reference case | no |
+
+`nl2sql` is answerable from telemetry alone, so a run benchmarking only that task does not require a
+detected incident -- requiring one would refuse work that is perfectly possible. See
+[nl2sql.md](nl2sql.md), including why its first results were a measurement of harness bugs rather
+than of the models.

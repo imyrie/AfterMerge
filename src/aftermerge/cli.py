@@ -7,10 +7,12 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.syntax import Syntax
 from rich.table import Table
 
 from aftermerge import llm
@@ -24,7 +26,15 @@ from aftermerge.dataquality.runner import (
 from aftermerge.detector import service as detector_service
 from aftermerge.detector import windows
 from aftermerge.detector.rules import SLO
-from aftermerge.evaluation.harness import TASKS, TESTGEN, EvalRun, run_matrix
+from aftermerge.evaluation.harness import (
+    INCIDENT_TASKS,
+    NL2SQL,
+    TASKS,
+    TESTGEN,
+    EvalReport,
+    EvalRun,
+    run_matrix,
+)
 from aftermerge.investigator import service as investigator_service
 from aftermerge.investigator.code_map import (
     DEFAULT_SOURCE_PREFIX,
@@ -32,6 +42,8 @@ from aftermerge.investigator.code_map import (
     diff_for,
 )
 from aftermerge.llm import TokenUsage
+from aftermerge.nl2sql import benchmark as nl2sql_benchmark
+from aftermerge.nl2sql import service as nl2sql_service
 from aftermerge.patcher.fix import CANDIDATE_DIR, CANDIDATE_NAME, propose_fix
 from aftermerge.patcher.patch import Patch, PatchRejected
 from aftermerge.patcher.proposer import AnthropicProposer, PatchContext, RevertProposer
@@ -1078,14 +1090,69 @@ def evaluate(
     a cheap model that is never accepted costs more per useful result than an
     expensive one that is.
     """
-    engine = _prepared_engine()
     repo_root = Path.cwd()
     model_list = [m.strip() for m in models.split(",") if m.strip()]
     task_list = [t.strip() for t in tasks.split(",") if t.strip()]
     for task in task_list:
         if task not in TASKS:
-            raise typer.BadParameter(f"unknown task {task!r}; use {' or '.join(TASKS)}")
+            raise typer.BadParameter(f"unknown task {task!r}; use one of {', '.join(TASKS)}")
 
+    # `nl2sql` is answerable from telemetry alone, so demanding an incident for a
+    # run that only benchmarks it would refuse work that is perfectly possible.
+    ctx: Any = None
+    patch_context: Any = None
+    test_path: Path | None = None
+    patch_path: Path | None = None
+    original_test: str | None = None
+    original_patch: str | None = None
+    if any(task in INCIDENT_TASKS for task in task_list):
+        ctx, patch_context, test_path, patch_path, original_test, original_patch = (
+            _incident_eval_setup(repo_root)
+        )
+
+    def run_one(model: str, task: str) -> EvalRun:
+        started = time.monotonic()
+        if task == NL2SQL:
+            return _run_nl2sql_eval(model, task, started, attempts=attempts)
+        if task == TESTGEN:
+            return _run_testgen_eval(
+                model, task, started, ctx=ctx, repo_root=repo_root, attempts=attempts, seed=seed
+            )
+        return _run_patch_eval(
+            model,
+            task,
+            started,
+            patch_context=patch_context,
+            repo_root=repo_root,
+            attempts=attempts,
+            seed=seed,
+            test_path=test_path,
+            original_test=original_test,
+        )
+
+    def announce(model: str, task: str) -> None:
+        console.print(f"[dim]running {model} / {task} ...[/dim]")
+
+    try:
+        report = run_matrix(model_list, task_list, run_one, on_start=announce)
+    finally:
+        if test_path is not None and original_test is not None:
+            test_path.write_text(original_test)
+        if patch_path is not None:
+            if original_patch is not None:
+                patch_path.parent.mkdir(parents=True, exist_ok=True)
+                patch_path.write_text(original_patch)
+            elif patch_path.is_file():
+                patch_path.unlink()
+
+    _print_eval_report(report, out)
+
+
+def _incident_eval_setup(
+    repo_root: Path,
+) -> tuple[Any, Any, Path, Path, str | None, str | None]:
+    """Everything the testgen and patch tasks need from the audit trail."""
+    engine = _prepared_engine()
     with store_db.session_scope(engine) as session:  # type: ignore[arg-type]
         found = IncidentRepository(session).list_recent(limit=1)
         if not found:
@@ -1124,70 +1191,115 @@ def evaluate(
     original_test = test_path.read_text() if test_path.is_file() else None
     patch_path = repo_root / CANDIDATE_DIR / CANDIDATE_NAME
     original_patch = patch_path.read_text() if patch_path.is_file() else None
+    return ctx, patch_context, test_path, patch_path, original_test, original_patch
 
-    def run_one(model: str, task: str) -> EvalRun:
-        started = time.monotonic()
-        if task == TESTGEN:
-            outcome = certify_test(
-                ctx,
-                AnthropicGenerator(llm.get_client(), model=model),
-                repo_root=repo_root,
-                max_attempts=attempts,
-                seed=seed,
-            )
-            usage = TokenUsage()
-            for attempt in outcome.attempts:
-                usage = usage + attempt.candidate.usage
-            return EvalRun(
-                model=model,
-                task=task,
-                accepted=outcome.succeeded,
-                attempts=len(outcome.attempts),
-                usage=usage,
-                seconds=time.monotonic() - started,
-                detail=outcome.summary,
-            )
 
-        # The patch task validates against a certified test, so restore the
-        # known-good one first; otherwise a model is judged on whichever test the
-        # previous run happened to leave behind.
-        if original_test is not None:
-            test_path.parent.mkdir(parents=True, exist_ok=True)
-            test_path.write_text(original_test)
-        outcome_fix = propose_fix(
-            patch_context,
-            AnthropicProposer(llm.get_client(), repo_root=repo_root, model=model),
-            repo_root=repo_root,
-            max_attempts=attempts,
-            seed=seed,
+def _run_testgen_eval(
+    model: str,
+    task: str,
+    started: float,
+    *,
+    ctx: Any,
+    repo_root: Path,
+    attempts: int,
+    seed: str | None,
+) -> EvalRun:
+    outcome = certify_test(
+        ctx,
+        AnthropicGenerator(llm.get_client(), model=model),
+        repo_root=repo_root,
+        max_attempts=attempts,
+        seed=seed,
+    )
+    usage = TokenUsage()
+    for attempt in outcome.attempts:
+        usage = usage + attempt.candidate.usage
+    return EvalRun(
+        model=model,
+        task=task,
+        accepted=outcome.succeeded,
+        attempts=len(outcome.attempts),
+        usage=usage,
+        seconds=time.monotonic() - started,
+        detail=outcome.summary,
+    )
+
+
+def _run_patch_eval(
+    model: str,
+    task: str,
+    started: float,
+    *,
+    patch_context: Any,
+    repo_root: Path,
+    attempts: int,
+    seed: str | None,
+    test_path: Path | None,
+    original_test: str | None,
+) -> EvalRun:
+    # The patch task validates against a certified test, so restore the
+    # known-good one first; otherwise a model is judged on whichever test the
+    # previous run happened to leave behind.
+    if test_path is not None and original_test is not None:
+        test_path.parent.mkdir(parents=True, exist_ok=True)
+        test_path.write_text(original_test)
+    outcome = propose_fix(
+        patch_context,
+        AnthropicProposer(llm.get_client(), repo_root=repo_root, model=model),
+        repo_root=repo_root,
+        max_attempts=attempts,
+        seed=seed,
+    )
+    usage = TokenUsage()
+    for attempt in outcome.attempts:
+        usage = usage + attempt.patch.usage
+    return EvalRun(
+        model=model,
+        task=task,
+        accepted=outcome.succeeded,
+        attempts=len(outcome.attempts),
+        usage=usage,
+        seconds=time.monotonic() - started,
+        detail=outcome.summary,
+    )
+
+
+def _run_nl2sql_eval(model: str, task: str, started: float, *, attempts: int) -> EvalRun:
+    """One run covers the whole reference set, and every case has to agree.
+
+    Averaging agreement across cases inside a run would let a model that got one
+    of three right look partly correct. Every other gate in this pipeline is
+    pass/fail on the whole artifact, so this one is too; the per-case detail
+    survives in the returned string.
+    """
+    ch = client.get_client()
+    model_client = llm.get_client()
+    comparisons: list[nl2sql_benchmark.Comparison] = []
+    usage = TokenUsage()
+    attempts_used = 0
+
+    for reference in nl2sql_benchmark.references():
+        proposal, comparison = nl2sql_service.answer_reference(
+            reference, ch=ch, client=model_client, model=model, max_attempts=attempts
         )
-        usage = TokenUsage()
-        for attempt_fix in outcome_fix.attempts:
-            usage = usage + attempt_fix.patch.usage
-        return EvalRun(
-            model=model,
-            task=task,
-            accepted=outcome_fix.succeeded,
-            attempts=len(outcome_fix.attempts),
-            usage=usage,
-            seconds=time.monotonic() - started,
-            detail=outcome_fix.summary,
-        )
+        usage = usage + proposal.usage
+        attempts_used += len(proposal.attempts)
+        comparisons.append(comparison)
 
-    def announce(model: str, task: str) -> None:
-        console.print(f"[dim]running {model} / {task} ...[/dim]")
+    agreed = [c for c in comparisons if c.agreed]
+    detail = "; ".join(f"{c.reference}: {'agrees' if c.agreed else c.detail}" for c in comparisons)
+    return EvalRun(
+        model=model,
+        task=task,
+        accepted=bool(comparisons) and len(agreed) == len(comparisons),
+        attempts=attempts_used,
+        usage=usage,
+        seconds=time.monotonic() - started,
+        detail=f"{len(agreed)}/{len(comparisons)} matched the catalog -- {detail}",
+    )
 
-    try:
-        report = run_matrix(model_list, task_list, run_one, on_start=announce)
-    finally:
-        if original_test is not None:
-            test_path.write_text(original_test)
-        if original_patch is not None:
-            patch_path.parent.mkdir(parents=True, exist_ok=True)
-            patch_path.write_text(original_patch)
-        elif patch_path.is_file():
-            patch_path.unlink()
 
+def _print_eval_report(report: EvalReport, out: Path | None) -> None:
     table = Table(title="model evaluation", title_justify="left", header_style="bold")
     for column in ("model", "task", "accepted", "attempts", "tokens", "cost", "secs"):
         table.add_column(column, no_wrap=True)
@@ -1222,6 +1334,74 @@ def evaluate(
     if out is not None:
         out.write_text(json.dumps(report.as_dict(), indent=2))
         console.print(f"\nwrote {out}")
+
+
+@app.command()
+def ask(
+    request: str = typer.Argument(..., help="The metric question, in plain language."),
+    model: str | None = typer.Option(None, help="Model id. Defaults to AFTERMERGE_MODEL."),
+    attempts: int = typer.Option(3, help="Generation attempts before giving up."),
+    show_sql: bool = typer.Option(True, help="Print the SQL that was accepted."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
+) -> None:
+    """Translate a metric request into ClickHouse SQL, gate it, and run it.
+
+    The gate is the point. Generated SQL fails in a way that looks like success
+    -- a filter on a value the exporter never writes runs cleanly and returns
+    zero, which reads as a real measurement -- so a statement is refused unless
+    it is a single bounded read, against the telemetry tables only, using
+    literals that can actually match, with every identifier resolved by the
+    server. Exits 1 when nothing survived that.
+
+    The answer is not recorded as evidence. A fact here belongs to an incident
+    it is evidence for, and an ad-hoc question is not evidence about anything.
+    """
+    ch = client.get_client()
+    try:
+        model_client = llm.get_client()
+    except llm.LLMUnavailable as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(code=2) from exc
+
+    result = nl2sql_service.ask(
+        request, ch=ch, client=model_client, model=model, max_attempts=attempts
+    )
+
+    if as_json:
+        payload = result.proposal.as_dict()
+        payload["rows"] = [list(r) for r in (result.outcome.rows if result.outcome else ())]
+        payload["columns"] = list(result.outcome.columns if result.outcome else ())
+        console.print_json(json.dumps(payload, default=str))
+    else:
+        for index, attempt in enumerate(result.proposal.attempts, start=1):
+            verdict = "accepted" if attempt.accepted else "rejected"
+            colour = "green" if attempt.accepted else "yellow"
+            console.print(f"attempt {index}: [{colour}]{verdict}[/{colour}]")
+            if not attempt.accepted:
+                console.print(attempt.feedback)
+
+        if show_sql and result.proposal.sql:
+            console.print(Syntax(result.proposal.sql, "sql", theme="ansi_dark"))
+
+        if result.outcome is not None and result.outcome.ok:
+            table = Table(title=request, title_justify="left", header_style="bold")
+            for column in result.outcome.columns:
+                table.add_column(column, overflow="fold")
+            for row in result.outcome.rows:
+                table.add_row(*(str(v) for v in row))
+            console.print(table)
+            scanned = result.outcome.read_rows
+            if scanned is not None:
+                console.print(f"[dim]read {scanned:,} rows[/dim]")
+
+    if not result.proposal.accepted:
+        console.print(
+            f"\n[yellow]no query survived the gate.[/yellow] {result.proposal.rejection_summary}"
+        )
+        raise typer.Exit(code=1)
+    if result.outcome is not None and not result.outcome.ok:
+        console.print(f"\n[red]accepted but failed to run:[/red] {result.outcome.error}")
+        raise typer.Exit(code=1)
 
 
 @app.command()

@@ -131,15 +131,21 @@ class DataQualityReport:
         }
 
 
-def filter_literals(sql_dir: Path, column: str) -> set[str]:
-    """Literals the catalog compares `column` against.
+def literals_in(sql: str, column: str) -> set[str]:
+    """Literals one statement compares `column` against.
 
-    Deliberately a regex over the .sql files rather than a parser: the catalog is
-    small, hand-written and stable, and the failure mode being guarded against is
-    a typo in a literal, which a regex sees perfectly well.
+    Deliberately a regex rather than a parser: the failure mode being guarded
+    against is a typo in a literal, which a regex sees perfectly well. Shared
+    with the generated-SQL gate, which asks the same question of a statement a
+    model just wrote.
     """
     pattern = re.compile(_FILTER_LITERAL.format(column=re.escape(column)), re.IGNORECASE)
+    return set(pattern.findall(sql))
+
+
+def filter_literals(sql_dir: Path, column: str) -> set[str]:
+    """Literals the catalog compares `column` against, across every .sql file."""
     found: set[str] = set()
     for path in sorted(sql_dir.glob("*.sql")):
-        found.update(pattern.findall(path.read_text()))
+        found.update(literals_in(path.read_text(), column))
     return found

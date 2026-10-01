@@ -22,7 +22,13 @@ from aftermerge.llm import TokenUsage
 
 TESTGEN = "testgen"
 PATCH = "patch"
-TASKS = (TESTGEN, PATCH)
+NL2SQL = "nl2sql"
+TASKS = (TESTGEN, PATCH, NL2SQL)
+
+#: Tasks that need a detected incident to evaluate against. `nl2sql` does not:
+#: a metric request stands on its own, which also makes it the one task here
+#: that can be benchmarked without first reproducing a regression.
+INCIDENT_TASKS = (TESTGEN, PATCH)
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr evaluate dq rollup stream dag
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr evaluate dq rollup stream dag ask
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
@@ -67,6 +67,10 @@ stream:
 ## Check data quality before drawing conclusions from the data
 dq:
 	uv run aftermerge dq
+
+## Ask a metric question in plain language: make ask Q="p95 latency by version"
+ask:
+	uv run aftermerge ask "$(Q)"
 
 ## Benchmark models on gate acceptance rate and cost per accepted result
 evaluate:
