@@ -16,6 +16,8 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from aftermerge import llm
+from aftermerge.api.app import create_app as create_api
+from aftermerge.api.cache import DEFAULT_TTL_SECONDS
 from aftermerge.dataquality.checks import ADVISORY
 from aftermerge.dataquality.runner import (
     DEFAULT_LOOKBACK_MINUTES,
@@ -1402,6 +1404,27 @@ def ask(
     if result.outcome is not None and not result.outcome.ok:
         console.print(f"\n[red]accepted but failed to run:[/red] {result.outcome.error}")
         raise typer.Exit(code=1)
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", help="Bind address. Localhost by default."),
+    port: int = typer.Option(8000, help="Port to listen on."),
+    ttl: float = typer.Option(
+        DEFAULT_TTL_SECONDS, help="Cache TTL in seconds. Tied to the rollup refresh cadence."
+    ),
+) -> None:
+    """Serve the read API over the telemetry rollups.
+
+    Binds to localhost by default. This API applies read-only caps and bounds
+    every lookback parameter, but it answers questions about production
+    telemetry and nothing about it is authenticated, so exposing it is a
+    deliberate act rather than the default.
+    """
+    import uvicorn
+
+    console.print(f"serving on http://{host}:{port} (docs at /docs)")
+    uvicorn.run(create_api(ttl_seconds=ttl), host=host, port=port, log_level="info")
 
 
 @app.command()

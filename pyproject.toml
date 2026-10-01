@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Closed-loop production regression pipeline: detect, investigate, reproduce, test, patch, verify."
 requires-python = ">=3.12"
 dependencies = [
-    "clickhouse-connect>=0.9",
+    "clickhouse-connect[async]>=0.9",
     "opentelemetry-sdk>=1.30",
     "opentelemetry-exporter-otlp-proto-grpc>=1.30",
     "typer>=0.15",
@@ -17,6 +17,8 @@ dependencies = [
     "anthropic>=0.40",
     "python-dotenv>=1.0",
     "confluent-kafka>=2.6",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
 ]
 
 [project.scripts]

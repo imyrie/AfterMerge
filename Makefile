@@ -1,4 +1,4 @@
-.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr evaluate dq rollup stream dag ask
+.PHONY: up down logs ps probe verify ch reset lint load dance facts truncate test test-all investigate testgen certify validate fix pr evaluate dq rollup stream dag ask serve
 
 ## Bring up storage + telemetry pipe (Phase A)
 up:
@@ -63,6 +63,10 @@ dag:
 ## Follow spans on Kafka and report a verdict during the rollout
 stream:
 	uv run aftermerge stream
+
+## Serve the read API over the rollups (localhost:8000, docs at /docs)
+serve:
+	uv run aftermerge serve
 
 ## Check data quality before drawing conclusions from the data
 dq:

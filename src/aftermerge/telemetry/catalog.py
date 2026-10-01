@@ -10,6 +10,7 @@ what makes a differential comparison meaningful.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -46,3 +47,16 @@ def load(name: str) -> Query:
 
 def names() -> list[str]:
     return sorted(p.stem for p in QUERIES_DIR.glob("*.sql"))
+
+
+#: ClickHouse's own parameter syntax, `{name:Type}`.
+_PARAMETER = re.compile(r"\{(\w+):(\w+)\}")
+
+
+def parameters(name: str) -> dict[str, str]:
+    """The parameters a query takes, with their declared types.
+
+    Read from the statement rather than maintained beside it, so a metric's
+    documented signature cannot drift from the one it actually has.
+    """
+    return dict(sorted(_PARAMETER.findall(load(name).sql)))
